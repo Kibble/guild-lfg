@@ -2,6 +2,10 @@
 
 **Version 0.4.0 — draft; native styling and role icons still need in-client visual verification.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
 
+## Screenshot
+
+![Guild Queue in game, showing role icons, dungeon selections, and a queued guild member](docs/images/guild-queue.png)
+
 ## What it does
 
 - Select any combination of **Tank**, **Healer**, and **Damage** using WoW's native shield, healing-cross, and damage role icons with checkbox overlays.

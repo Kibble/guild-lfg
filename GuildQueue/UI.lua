@@ -497,6 +497,7 @@ function ns.RefreshUI()
     counters.queued:SetText(#players)
     counters.groups:SetText(#ns.groups)
     counters.unmatched:SetText(#ns.individuals)
+    counters.online:SetText(ns.OnlineAddonCount())
     joinButton:SetText(ns.queued and "Leave queue" or "Join queue")
     -- Leaving must remain possible when identity/transport/selections are unavailable.
     joinButton:SetEnabled(ns.queued or ns.JoinQueueDisabledReason() == nil)
@@ -553,13 +554,15 @@ local function createUI()
     local header = panel(frame, 18, 18, 1024, 79, C.panel)
     label(header, "Guild Queue", 16, 4, 385, 28, "GameFontNormalHuge", C.heading)
     guildLabel = label(header, "", 16, 34, 430, 18, "GameFontNormal", C.text)
-    label(header, "Guild members with the addon only", 16, 57, 430, 16, nil, C.muted)
+    label(header, "Guild members with addon seen in the last 75 seconds", 16, 57, 430, 16, nil, C.muted)
     for index, entry in ipairs({ { "queued", "QUEUED" }, { "groups", "GROUPS" },
-        { "unmatched", "UNMATCHED" } }) do
-        local x = 524 + (index - 1) * 100
-        counters[entry[1]] = label(header, "0", x, 12, 96, 26, "GameFontNormalLarge", C.heading)
+        { "unmatched", "UNMATCHED" }, { "online", "ADDON ONLINE" } }) do
+        local x = 452 + (index - 1) * 94
+        counters[entry[1]] = label(header, "0", x, 12, 90, 26, "GameFontNormalLarge", C.heading)
+        counters[entry[1]].guildQueueKind = "counter"
+        counters[entry[1]].counterName = entry[1]
         counters[entry[1]]:SetJustifyH("CENTER")
-        local caption = label(header, entry[2], x, 44, 96, 16, "GameFontNormalSmall", C.muted)
+        local caption = label(header, entry[2], x, 44, 90, 16, "GameFontNormalSmall", C.muted)
         caption:SetJustifyH("CENTER")
     end
     queueStatus = label(header, "", 828, 20, 170, 36, "GameFontNormal", C.green, true)

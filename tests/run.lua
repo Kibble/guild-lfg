@@ -57,8 +57,9 @@ test("round trip all roles and all dungeons fits the wire limit", function()
     equal(decoded.revision, 1800000000001)
     equal(ns.Protocol.DungeonList(decoded.dungeons), ns.Protocol.DungeonList(selected))
 end)
-test("hello and withdrawal round trip", function()
+test("hello and presence messages round trip with withdrawals", function()
     equal(ns.Protocol.Decode("1|H").kind, "H")
+    equal(ns.Protocol.Decode(ns.Protocol.Encode({ kind = "P" })).kind, "P")
     equal(ns.Protocol.Decode(ns.Protocol.Encode({ kind = "X", revision = 2, sentAt = 1000 })).kind, "X")
 end)
 test("malformed or incompatible payloads are rejected", function()
@@ -535,18 +536,54 @@ test("delayed guild identity recovers automatically without a roster event", fun
     c:advance(1)
     assert(c.ns.state.records[c.ns.playerName])
 end)
-test("only the server-enforced guild transport and exact prefix admit peer state", function()
+test("presence counts self and recent guild-addon peers, expires them, and resets on guild change", function()
+    local c = client()
+    equal(c.ns.OnlineAddonCount(), 1)
+    c:receive("Friend-TestRealm", { kind = "P" })
+    equal(c.ns.OnlineAddonCount(), 2)
+    c:advance(c.ns.TIMEOUT - 1)
+    equal(c.ns.OnlineAddonCount(), 2)
+    c:advance(1)
+    equal(c.ns.OnlineAddonCount(), 1)
+    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    equal(c.ns.OnlineAddonCount(), 2)
+    assert(c.ns.state.records["Friend-TestRealm"])
+    c.guild = "Other Guild"
+    c:fire("PLAYER_GUILD_UPDATE", "player")
+    equal(c.ns.OnlineAddonCount(), 1)
+    equal(c.ns.state.records["Friend-TestRealm"], nil)
+    local noGuild = client({ noGuild = true })
+    equal(noGuild.ns.OnlineAddonCount(), 0)
+end)
+test("idle addon users periodically broadcast guild-only presence without joining queue", function()
+    local c = client()
+    c:advance(22)
+    assert(not c.ns.queued)
+    local presences = 0
+    for _, message in ipairs(c.sent) do
+        if c.ns.Protocol.Decode(message.text).kind == "P" then
+            presences = presences + 1
+            equal(message.channel, "GUILD")
+        end
+    end
+    assert(presences >= 1)
+end)
+test("only the server-enforced guild transport and exact prefix admit peer state and presence", function()
     local c = client({ roster = {} })
     local p = packet(1, 1, nil, c.now, c.now)
     -- WoW delivers GUILD traffic only from guild members. Outsiders cannot choose
     -- that receive channel; untrusted whispers/party traffic must never be relayed.
     for _, channel in ipairs({ "WHISPER", "PARTY", "RAID", "OFFICER", "INSTANCE_CHAT", "CHANNEL" }) do
         c:receive("Outsider-TestRealm", p, channel)
+        c:receive("Outsider-TestRealm", { kind = "P" }, channel)
     end
     c:receive("Friend-TestRealm", p, "GUILD", "OtherAddon")
+    c:receive("Friend-TestRealm", { kind = "P" }, "GUILD", "OtherAddon")
     equal(next(c.ns.state.records), nil)
+    equal(c.ns.OnlineAddonCount(), 1)
     c:receive("Friend-TestRealm", p)
     equal(c.ns.state.records["Friend-TestRealm"].roles, 1)
+    equal(c.ns.OnlineAddonCount(), 2)
 end)
 test("not being in a guild still blocks queuing and guild traffic", function()
     local c = client({ noGuild = true })
@@ -816,6 +853,22 @@ local function openUI(c)
     return widgets
 end
 
+test("UI header displays and refreshes the recent online-addon member count", function()
+    local c = client()
+    local widgets = openUI(c)
+    local onlineCounter
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "counter" and control.counterName == "online" then
+            onlineCounter = control
+        end
+    end
+    assert(onlineCounter)
+    equal(onlineCounter.text, "1") -- This character is included when guild identity is ready.
+    c:receive("Friend-TestRealm", { kind = "P" })
+    equal(onlineCounter.text, "2")
+    c:advance(c.ns.TIMEOUT)
+    equal(onlineCounter.text, "1")
+end)
 test("UI opens and its multi-select controls drive the real queue", function()
     local c = client()
     local widgets = openUI(c)

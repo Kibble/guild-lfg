@@ -1,8 +1,9 @@
 local addonName, ns = ...
 local events = CreateFrame("Frame")
 local guildIdentityReady = false
-local pendingStateAt, pendingHello = nil, false
-local lastAttempt, lastSent, lastHello, lastHelloReply = -100, -100, -100, -100
+local pendingStateAt, pendingHello, pendingPresence = nil, false, false
+local lastAttempt, lastSent, lastHello, lastPresence, lastHelloReply = -100, -100, -100, -100, -100
+local presence = {}
 local registered, started = false, false
 local transportError
 local lastPartyInviteAt = -100
@@ -52,6 +53,19 @@ end
 
 function ns.IsReady()
     return registered and IsInGuild() and guildIdentityReady and ns.playerName ~= nil
+end
+
+function ns.OnlineAddonCount()
+    if not ns.IsReady() then
+        return 0
+    end
+    local now, count = GetServerTime(), 1
+    for _, seenAt in pairs(presence) do
+        if now - seenAt < ns.TIMEOUT then
+            count = count + 1
+        end
+    end
+    return count
 end
 
 function ns.StatusText()
@@ -217,7 +231,9 @@ local function applyGuildIdentity(guildName, guildRealm)
         ns.guildKey, ns.guildName = key, guildName
         ns.queued, ns.joinedAt = false, nil
         ns.state = ns.State.New()
-        pendingStateAt, pendingHello = nil, key ~= nil
+        pendingStateAt, pendingHello, pendingPresence = nil, key ~= nil, key ~= nil
+        lastHello, lastPresence, lastHelloReply = -100, -100, -100
+        presence = {}
         transportError = nil
         if key then
             -- A new revision tombstone clears any pre-reload queue entry.
@@ -276,7 +292,8 @@ local function sendState()
         packet.joinedAt, packet.roles, packet.dungeons = ns.joinedAt, ns.prefs.roles, ns.prefs.dungeons
     end
     if send(ns.Protocol.Encode(packet)) then
-        pendingStateAt, lastSent = nil, GetTime()
+        pendingStateAt, lastSent, lastPresence = nil, GetTime(), GetTime()
+        pendingPresence = false
         if ns.state:Apply(ns.playerName, packet, now) then
             rebuild()
         end
@@ -291,8 +308,14 @@ local function tick()
     end
     local clock = GetTime()
     updateGuild()
-    if ns.state:Prune(GetServerTime()) then
+    local serverNow = GetServerTime()
+    if ns.state:Prune(serverNow) then
         rebuild()
+    end
+    for name, seenAt in pairs(presence) do
+        if serverNow - seenAt >= ns.TIMEOUT then
+            presence[name] = nil
+        end
     end
     if not ns.IsReady() then
         ns.RefreshUI()
@@ -300,6 +323,8 @@ local function tick()
     end
     if ns.queued and clock - lastSent >= ns.HEARTBEAT then
         requestState(0)
+    elseif not ns.queued and clock - lastPresence >= ns.HEARTBEAT then
+        pendingPresence = true
     end
     -- At most one outgoing message per second; failures back off for five seconds.
     local interval = transportError and 5 or 1
@@ -311,6 +336,11 @@ local function tick()
             lastAttempt = clock
             if send(ns.Protocol.Encode({ kind = "H" })) then
                 pendingHello, lastHello = false, clock
+            end
+        elseif pendingPresence then
+            lastAttempt = clock
+            if send(ns.Protocol.Encode({ kind = "P" })) then
+                pendingPresence, lastPresence = false, clock
             end
         end
     end
@@ -337,13 +367,21 @@ local function receive(prefix, message, channel, sender)
     if not packet then
         return
     end
-    if packet.kind == "H" then
-        if ns.queued and GetTime() - lastHelloReply >= 5 then
+    local now = GetServerTime()
+    if packet.kind == "H" or packet.kind == "P" then
+        presence[name] = now
+        if packet.kind == "H" and ns.queued and GetTime() - lastHelloReply >= 5 then
             lastHelloReply = GetTime()
             requestState(math.random(1, 5))
         end
-    elseif ns.state:Apply(name, packet, GetServerTime()) then
-        rebuild()
+        ns.RefreshUI()
+    elseif packet.sentAt <= now + 5 and now - packet.sentAt < ns.TIMEOUT then
+        presence[name] = now
+        if ns.state:Apply(name, packet, now) then
+            rebuild()
+        else
+            ns.RefreshUI()
+        end
     end
 end
 

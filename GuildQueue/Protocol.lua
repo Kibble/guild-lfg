@@ -40,8 +40,8 @@ end
 
 -- No identity is carried in the payload: the game-provided sender owns this state.
 function Protocol.Encode(packet)
-    if packet.kind == "H" then
-        return "1|H"
+    if packet.kind == "H" or packet.kind == "P" then
+        return "1|" .. packet.kind
     end
     local parts = { "1", packet.kind, string.format("%.0f", packet.revision),
         string.format("%.0f", packet.sentAt) }
@@ -57,8 +57,8 @@ function Protocol.Decode(message)
     if type(message) ~= "string" or #message > 255 or message:find("%z") then
         return nil
     end
-    if message == "1|H" then
-        return { kind = "H" }
+    if message == "1|H" or message == "1|P" then
+        return { kind = message:sub(3) }
     end
     local fields = {}
     for field in (message .. "|"):gmatch("(.-)|") do

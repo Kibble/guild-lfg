@@ -1,6 +1,6 @@
 # Guild Queue — WoW:Forever addon
 
-**Version 0.4.0 — draft; native styling and role icons still need in-client visual verification.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
+**Version 0.5.0 — draft; native styling, role icons, and live presence count still need in-client verification.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
 
 ## Screenshot
 
@@ -12,7 +12,7 @@
 - Select one or more dungeons, including Forever's nine new dungeons.
 - Join a shared queue visible to guild members running the same addon version.
 - Suggest five-player groups: **one tank, one healer, three damage dealers**. Each player fills exactly one of their selected roles, and all five must share at least one selected dungeon.
-- Display **native WoW styling**: dialog borders, dark panels, gold headings, standard panel buttons, checkboxes, close-button artwork, and scroll knobs. Keep queue counters and scrollable selections.
+- Display **native WoW styling**: dialog borders, dark panels, gold headings, standard panel buttons, checkboxes, close-button artwork, and scroll knobs. Show queue counters, a live count of recently heard-from guild members with the addon, and scrollable selections.
 - Highlight **your suggested group** with five player tiles showing their **assigned-role icons**. Show other groups, **unmatched individual cards**, and an **all queued members** tab. Individual cards show an icon for each selected role; your group's tiles also show selected-role icons below the name. Each player appears in at most one suggestion.
 - Show full character names, roles, and dungeon selections in hover tooltips while keeping card text bounded.
 - Show **Create party** on your own suggested group. Clicking it requests invitations for the other four players; each must accept through WoW.
@@ -36,7 +36,9 @@ Additional commands: `/gq join` uses your current selections; `/gq leave` withdr
 
 Use Battle.net's **Show in Explorer** to find your installation; the launch client's folder is normally `_forever_`. Other files in this download are development files and do not need to be installed.
 
-**Updating from 0.2.x or 0.3.x:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
+**Updating from 0.2.x, 0.3.x, or 0.4.x:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
+
+**Online addon count in 0.5.0:** the header displays how many guild clients running the addon have been heard from within the last 75 seconds. It includes your character when guild identity is ready. Queued clients' regular state heartbeats provide presence; other clients send a small guild-only presence message every 20 seconds. Counts expire after 75 seconds without a message, so logouts can take that long to disappear and account restrictions or messaging delays can briefly lower the count. It is a recent-presence estimate, not a direct guild roster query.
 
 **UI update in 0.4.0:** native WoW dialog borders and panel-button/checkbox/close-button templates replace the navy/gold custom skin. The role selector uses 48-pixel native LFG role icons with checkbox overlays and remains multi-select. Group slots show assigned-role icons; individual and all-queued cards show every selected role as an icon. Role names remain in labels/tooltips. Pooled cards reset their icons when preferences change so old selections do not remain visible. Cards, counters, per-tab scrolling, and click-only invitations are retained. No external artwork or Blizzard Dungeon Finder queue integration is required. Actual font rendering and asset appearance still need verification in WoW.
 
@@ -46,7 +48,7 @@ Use Battle.net's **Show in Explorer** to find your installation; the launch clie
 
 ## How synchronization and matching work
 
-Each queued player broadcasts only their own state on the **guild addon-message channel**, initially and every 20 seconds. Newly connected addon users request current states. Withdrawals are sent immediately when possible; disconnected or unreachable entries expire after **75 seconds** without a fresh update. A small persisted revision counter prevents older messages from undoing newer updates or withdrawals.
+Each queued player broadcasts only their own state on the **guild addon-message channel**, initially and every 20 seconds. Non-queued clients broadcast a minimal guild-only presence message every 20 seconds. Newly connected addon users request current queue states. Queue entries and presence expire after **75 seconds** without a fresh message; the header count includes your own ready client and peers heard from within that window. Withdrawals are sent immediately when possible. A small persisted revision counter prevents older queue messages from undoing newer updates or withdrawals.
 
 Messages are accepted only through WoW's server-enforced **GUILD addon-message channel**, with the exact prefix, protocol version, and valid role/dungeon selections. The game-provided sender owns each entry; messages never relay someone else's state. WoW restricts delivery on this channel to guild members, so a separate cached roster is not needed for joining, synchronization, or matching. Whispers, party/raid channels, and ordinary chat are never used as fallbacks. Account restrictions, server throttling, combat/chat restrictions, or loading screens can delay delivery; the UI reports send failures and retries.
 
@@ -64,7 +66,7 @@ Automated Lua tests are included in `tests/run.lua`, covering protocol validatio
 
 Run from the extracted project root with **Lua 5.1**: `lua5.1 tests/run.lua` (or `lua tests/run.lua` if that is your Lua 5.1 executable). Lua is a development tool only and is not required by players.
 
-**Current status:** all **66 automated tests passed** under **Lua 5.1.5**, including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. New tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, and pressed-state native tabs. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
+**Current status:** all **69 automated tests passed** under **Lua 5.1.5**, including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
 
 Before wider use, test with at least five addon-equipped guild characters:
 
@@ -74,7 +76,7 @@ Before wider use, test with at least five addon-equipped guild characters:
 4. Verify that matching and queue updates never issue invitations. Click **Create party** while solo and verify that exactly the other four players receive invitations and must accept manually.
 5. Join a party or raid and verify that **Create party** is disabled and its tooltip explains why. Leave the party and verify that the button becomes available again. Also test stale suggestions, combat, declined invitations, and players disconnecting during the action.
 6. Test messaging during combat/loading and any account restrictions, plus guild departure/rejoining and alongside other addons.
-7. Verify native borders/buttons/checkboxes, role selector icons and checkmarks, card text and role icons, hovered full-name/dungeon tooltips, both tabs, mouse-wheel/track scrolling, and small-screen scaling. Change selected roles while queued and confirm icons update without stale selections. Confirm that queued/group/unmatched counters reflect actual unique players.
+7. Verify native borders/buttons/checkboxes, role selector icons and checkmarks, card text and role icons, hovered full-name/dungeon tooltips, both tabs, mouse-wheel/track scrolling, and small-screen scaling. Change selected roles while queued and confirm icons update without stale selections. Check that the addon-online count includes the local client and updates as other addon users load, leave, or disconnect; offline users may remain counted for up to 75 seconds.
 
 ## Source layout
 
@@ -83,7 +85,7 @@ Before wider use, test with at least five addon-equipped guild characters:
 - `State.lua`: live queue, revision ordering, withdrawals, expiry.
 - `Matcher.lua`: deterministic role-compatible group suggestions.
 - `UI.lua`: native WoW styling/controls and role icons, pooled group/member/individual cards, counters, tooltips, and scrollable selections/views.
-- `Core.lua`: client events, guild identity and guild-channel validation, throttled synchronization, guarded click-only invitation requests, and diagnostic commands.
+- `Core.lua`: client events, guild identity and guild-channel validation, throttled queue/presence synchronization, guarded click-only invitation requests, and diagnostic commands.
 
 ## Compatibility references
 

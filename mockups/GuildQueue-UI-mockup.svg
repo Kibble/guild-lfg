@@ -1,0 +1,165 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120">
+<title>Guild Queue: guild-only dungeon matchmaking UI concept</title>
+<desc>Multi-select roles and dungeons on the left. On the right, one suggested five-player group and three unmatched individuals. No party is created automatically.</desc>
+<defs>
+  <linearGradient id="canvas" x2="1" y2="1"><stop stop-color="#14191d"/><stop offset="1" stop-color="#080c10"/></linearGradient>
+  <linearGradient id="window" x2="0" y2="1"><stop stop-color="#23282c"/><stop offset="1" stop-color="#14191d"/></linearGradient>
+  <linearGradient id="header" x2="1" y2="0"><stop stop-color="#343128"/><stop offset=".65" stop-color="#22282b"/><stop offset="1" stop-color="#1a2227"/></linearGradient>
+  <linearGradient id="gold" x2="0" y2="1"><stop stop-color="#e6c987"/><stop offset="1" stop-color="#9c7942"/></linearGradient>
+  <linearGradient id="selected" x2="0" y2="1"><stop stop-color="#37352c"/><stop offset="1" stop-color="#292b29"/></linearGradient>
+  <linearGradient id="leave" x2="0" y2="1"><stop stop-color="#753b3a"/><stop offset="1" stop-color="#4c282b"/></linearGradient>
+</defs>
+<rect x="0" y="0" width="1600" height="1120" rx="0" fill="url(#canvas)" stroke="none" stroke-width="1"/>
+<text x="50" y="49" fill="#cdb783" font-family="DejaVu Sans" font-size="18" font-weight="bold" text-anchor="start" letter-spacing="3">GUILD QUEUE</text>
+<text x="1550" y="49" fill="#839198" font-family="DejaVu Sans" font-size="14" font-weight="normal" text-anchor="end" letter-spacing="1.5">UI CONCEPT  /  ILLUSTRATIVE DATA</text>
+<rect x="47" y="84" width="1506" height="966" rx="12" fill="#080c0f" stroke="#090e11" stroke-width="3"/>
+<rect x="50" y="80" width="1500" height="966" rx="10" fill="url(#window)" stroke="#9a8255" stroke-width="2"/>
+<rect x="57" y="87" width="1486" height="952" rx="6" fill="none" stroke="#4e4d42" stroke-width="1"/>
+<rect x="59" y="89" width="1482" height="130" rx="4" fill="url(#header)" stroke="none" stroke-width="1"/>
+<path d="M60 220 L1540 220" fill="none" stroke="#766448" stroke-width="1" stroke-linecap="round"/>
+<circle cx="69" cy="99" r="3" fill="#c1a268" stroke="none"/>
+<circle cx="69" cy="1028" r="3" fill="#c1a268" stroke="none"/>
+<circle cx="1531" cy="99" r="3" fill="#c1a268" stroke="none"/>
+<circle cx="1531" cy="1028" r="3" fill="#c1a268" stroke="none"/>
+<path d="M87 122 L116 113 L145 122 L143 152 Q139 173 116 184 Q93 173 89 152 Z" fill="#161e22" stroke="#c7aa70" stroke-width="2"/>
+<path d="M116 123 L116 168 M101 138 L131 138" stroke="#c7aa70" stroke-width="3"/>
+<text x="168" y="143" fill="#eed6a0" font-family="DejaVu Serif" font-size="34" font-weight="bold" text-anchor="start">Guild Queue</text>
+<text x="169" y="175" fill="#aeb6b9" font-family="DejaVu Sans" font-size="14" font-weight="normal" text-anchor="start" letter-spacing="1.4">DUNGEON MATCHMAKING  ·  GUILD MEMBERS ONLY</text>
+<circle cx="177" cy="201" r="4" fill="#83bf97" stroke="none"/>
+<text x="190" y="207" fill="#ccd9cf" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Silver Vanguard</text>
+<text x="375" y="207" fill="#9daab0" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">8 members queued</text>
+<rect x="1224" y="130" width="242" height="46" rx="23" fill="#1b2924" stroke="#526c55" stroke-width="1"/>
+<circle cx="1248" cy="153" r="5" fill="#8cca9a" stroke="none"/>
+<text x="1263" y="160" fill="#b5d8bb" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Your queue is active</text>
+<rect x="1493" y="103" width="29" height="29" rx="4" fill="#392a29" stroke="#806059" stroke-width="1"/>
+<path d="M1502 112 L1513 123" fill="none" stroke="#dcc4b6" stroke-width="2" stroke-linecap="round"/>
+<path d="M1513 112 L1502 123" fill="none" stroke="#dcc4b6" stroke-width="2" stroke-linecap="round"/>
+<rect x="76" y="244" width="410" height="738" rx="6" fill="#192024" stroke="#3c464b" stroke-width="1"/>
+<text x="99" y="278" fill="#d3ba81" font-family="DejaVu Sans" font-size="15" font-weight="bold" text-anchor="start" letter-spacing="1.6">YOUR SELECTIONS</text>
+<text x="99" y="308" fill="#e4e6e4" font-family="DejaVu Sans" font-size="21" font-weight="bold" text-anchor="start">Roles</text>
+<text x="462" y="306" fill="#929fa5" font-family="DejaVu Sans" font-size="13" font-weight="normal" text-anchor="end">Select one or more</text>
+<rect x="99" y="326" width="102" height="46" rx="4" fill="url(#selected)" stroke="#9f8554" stroke-width="1"/>
+<rect x="110" y="339" width="19" height="19" rx="3" fill="#10171b" stroke="#bda36d" stroke-width="1.5"/>
+<path d="M114 348.88 l4.18 4.18 l8.17 -9.31" fill="none" stroke="#e8cd8e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="138" y="355" fill="#ecd29a" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Tank</text>
+<rect x="211" y="326" width="122" height="46" rx="4" fill="#20282d" stroke="#455057" stroke-width="1"/>
+<rect x="222" y="339" width="19" height="19" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="250" y="355" fill="#b3bec4" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Healer</text>
+<rect x="343" y="326" width="121" height="46" rx="4" fill="url(#selected)" stroke="#9f8554" stroke-width="1"/>
+<rect x="354" y="339" width="19" height="19" rx="3" fill="#10171b" stroke="#bda36d" stroke-width="1.5"/>
+<path d="M358 348.88 l4.18 4.18 l8.17 -9.31" fill="none" stroke="#e8cd8e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="382" y="355" fill="#ecd29a" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Damage</text>
+<path d="M99 394 L463 394" fill="none" stroke="#354147" stroke-width="1" stroke-linecap="round"/>
+<text x="99" y="430" fill="#e4e6e4" font-family="DejaVu Sans" font-size="21" font-weight="bold" text-anchor="start">Dungeons</text>
+<text x="462" y="429" fill="#d7bd86" font-family="DejaVu Sans" font-size="14" font-weight="normal" text-anchor="end">3 selected</text>
+<text x="99" y="457" fill="#929fa5" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="start">Only dungeons you want to run.</text>
+<rect x="102" y="484" width="22" height="22" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="137" y="501" fill="#b6c0c5" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Ragefire Chasm</text>
+<rect x="102" y="522" width="22" height="22" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="137" y="539" fill="#b6c0c5" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Hall of Thanes</text>
+<rect x="102" y="560" width="22" height="22" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="137" y="577" fill="#b6c0c5" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Ruins of Lordaeron</text>
+<rect x="102" y="598" width="22" height="22" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="137" y="615" fill="#b6c0c5" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Wailing Caverns</text>
+<rect x="91" y="630" width="370" height="35" rx="3" fill="#2b302b" stroke="none" stroke-width="1"/>
+<rect x="102" y="636" width="22" height="22" rx="3" fill="#10171b" stroke="#bda36d" stroke-width="1.5"/>
+<path d="M106 647.44 l4.84 4.84 l9.459999999999999 -10.78" fill="none" stroke="#e8cd8e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="137" y="653" fill="#ead7aa" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">The Deadmines</text>
+<rect x="91" y="668" width="370" height="35" rx="3" fill="#2b302b" stroke="none" stroke-width="1"/>
+<rect x="102" y="674" width="22" height="22" rx="3" fill="#10171b" stroke="#bda36d" stroke-width="1.5"/>
+<path d="M106 685.44 l4.84 4.84 l9.459999999999999 -10.78" fill="none" stroke="#e8cd8e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="137" y="691" fill="#ead7aa" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Shadowfang Keep</text>
+<rect x="91" y="706" width="370" height="35" rx="3" fill="#2b302b" stroke="none" stroke-width="1"/>
+<rect x="102" y="712" width="22" height="22" rx="3" fill="#10171b" stroke="#bda36d" stroke-width="1.5"/>
+<path d="M106 723.44 l4.84 4.84 l9.459999999999999 -10.78" fill="none" stroke="#e8cd8e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="137" y="729" fill="#ead7aa" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Blackfathom Deeps</text>
+<rect x="102" y="750" width="22" height="22" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="137" y="767" fill="#b6c0c5" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">The Stockade</text>
+<rect x="102" y="788" width="22" height="22" rx="3" fill="#10171b" stroke="#586167" stroke-width="1.5"/>
+<text x="137" y="805" fill="#b6c0c5" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Excavation Site</text>
+<rect x="470" y="484" width="5" height="326" rx="2" fill="#10171b" stroke="none" stroke-width="1"/>
+<rect x="470" y="487" width="5" height="83" rx="2" fill="#66726f" stroke="none" stroke-width="1"/>
+<text x="99" y="846" fill="#87969e" font-family="DejaVu Sans" font-size="13" font-weight="normal" text-anchor="start">Scroll for more dungeons</text>
+<rect x="99" y="865" width="174" height="36" rx="5" fill="#242b30" stroke="#444f56" stroke-width="1"/>
+<text x="186.0" y="889.0" fill="#c8d0d5" font-family="DejaVu Sans" font-size="18" font-weight="normal" text-anchor="middle">Select all</text>
+<rect x="284" y="865" width="179" height="36" rx="5" fill="#242b30" stroke="#444f56" stroke-width="1"/>
+<text x="373.5" y="889.0" fill="#c8d0d5" font-family="DejaVu Sans" font-size="18" font-weight="normal" text-anchor="middle">Clear</text>
+<rect x="99" y="917" width="364" height="44" rx="5" fill="url(#leave)" stroke="#a46660" stroke-width="1"/>
+<text x="281.0" y="945.0" fill="#f1dcd7" font-family="DejaVu Sans" font-size="18" font-weight="bold" text-anchor="middle">Leave queue</text>
+<rect x="511" y="244" width="289" height="48" rx="5" fill="url(#selected)" stroke="#ab8c54" stroke-width="1"/>
+<text x="655.5" y="274.0" fill="#efd79e" font-family="DejaVu Sans" font-size="18" font-weight="bold" text-anchor="middle">Groups + individuals</text>
+<rect x="811" y="244" width="226" height="48" rx="5" fill="#242b30" stroke="#444f56" stroke-width="1"/>
+<text x="924.0" y="274.0" fill="#c8d0d5" font-family="DejaVu Sans" font-size="18" font-weight="normal" text-anchor="middle">All queued (8)</text>
+<text x="1519" y="274" fill="#9aa9af" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="end">Live guild queue</text>
+<circle cx="1382" cy="269" r="4" fill="#86b89a" stroke="none"/>
+<text x="515" y="331" fill="#e8d09b" font-family="DejaVu Serif" font-size="23" font-weight="bold" text-anchor="start">Suggested groups</text>
+<rect x="768" y="309" width="33" height="28" rx="12" fill="#303329" stroke="#6d654c" stroke-width="1"/>
+<text x="784" y="329" fill="#e1ca94" font-family="DejaVu Sans" font-size="16" font-weight="bold" text-anchor="middle">1</text>
+<text x="1518" y="329" fill="#99a8b0" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="end">1 tank  /  1 healer  /  3 damage</text>
+<rect x="511" y="352" width="1015" height="346" rx="6" fill="#1a2227" stroke="#685c42" stroke-width="1"/>
+<rect x="512" y="353" width="1013" height="100" rx="5" fill="#2b2d28" stroke="none" stroke-width="1"/>
+<text x="536" y="386" fill="#b2a37e" font-family="DejaVu Sans" font-size="12" font-weight="bold" text-anchor="start" letter-spacing="1.5">GROUP 1</text>
+<text x="536" y="417" fill="#f0d8a2" font-family="DejaVu Serif" font-size="26" font-weight="bold" text-anchor="start">The Deadmines</text>
+<rect x="1330" y="377" width="170" height="34" rx="17" fill="#20352a" stroke="#516d50" stroke-width="1"/>
+<text x="1415" y="399" fill="#b7d8b5" font-family="DejaVu Sans" font-size="15" font-weight="bold" text-anchor="middle">5-player match</text>
+<text x="536" y="443" fill="#aab8ae" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="start">Common dungeons: The Deadmines, Shadowfang Keep</text>
+<text x="536" y="479" fill="#83959e" font-family="DejaVu Sans" font-size="12" font-weight="normal" text-anchor="start" letter-spacing="1.3">ASSIGNED ROLE</text>
+<text x="795" y="479" fill="#83959e" font-family="DejaVu Sans" font-size="12" font-weight="normal" text-anchor="start" letter-spacing="1.3">GUILD MEMBER</text>
+<text x="1498" y="479" fill="#83959e" font-family="DejaVu Sans" font-size="12" font-weight="normal" text-anchor="end" letter-spacing="1.3">SELECTED ROLES</text>
+<rect x="526" y="492" width="984" height="36" rx="3" fill="#26322d" stroke="none" stroke-width="1"/>
+<rect x="538" y="498" width="24" height="24" rx="4" fill="#172024" stroke="#52606a" stroke-width="1"/>
+<text x="550" y="515" fill="#96bed8" font-family="DejaVu Sans" font-size="13" font-weight="bold" text-anchor="middle">T</text>
+<text x="576" y="516" fill="#96bed8" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Tank</text>
+<text x="795" y="516" fill="#b7dfb7" font-family="DejaVu Sans" font-size="17" font-weight="bold" text-anchor="start">Arden-Azeroth (you)</text>
+<text x="1498" y="516" fill="#9cabb3" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="end">Tank / Damage</text>
+<rect x="526" y="531" width="984" height="36" rx="3" fill="#1a2227" stroke="none" stroke-width="1"/>
+<rect x="538" y="537" width="24" height="24" rx="4" fill="#172024" stroke="#52606a" stroke-width="1"/>
+<text x="550" y="554" fill="#a8c99d" font-family="DejaVu Sans" font-size="13" font-weight="bold" text-anchor="middle">H</text>
+<text x="576" y="555" fill="#a8c99d" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Healer</text>
+<text x="795" y="555" fill="#d3dade" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Elowen-Azeroth</text>
+<text x="1498" y="555" fill="#9cabb3" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="end">Healer</text>
+<rect x="526" y="570" width="984" height="36" rx="3" fill="#1d272c" stroke="none" stroke-width="1"/>
+<rect x="538" y="576" width="24" height="24" rx="4" fill="#172024" stroke="#52606a" stroke-width="1"/>
+<text x="550" y="593" fill="#d9ab91" font-family="DejaVu Sans" font-size="13" font-weight="bold" text-anchor="middle">D</text>
+<text x="576" y="594" fill="#d9ab91" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Damage</text>
+<text x="795" y="594" fill="#d3dade" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Torren-Azeroth</text>
+<text x="1498" y="594" fill="#9cabb3" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="end">Damage</text>
+<rect x="526" y="609" width="984" height="36" rx="3" fill="#1a2227" stroke="none" stroke-width="1"/>
+<rect x="538" y="615" width="24" height="24" rx="4" fill="#172024" stroke="#52606a" stroke-width="1"/>
+<text x="550" y="632" fill="#d9ab91" font-family="DejaVu Sans" font-size="13" font-weight="bold" text-anchor="middle">D</text>
+<text x="576" y="633" fill="#d9ab91" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Damage</text>
+<text x="795" y="633" fill="#d3dade" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Nym-Azeroth</text>
+<text x="1498" y="633" fill="#9cabb3" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="end">Damage</text>
+<rect x="526" y="648" width="984" height="36" rx="3" fill="#1d272c" stroke="none" stroke-width="1"/>
+<rect x="538" y="654" width="24" height="24" rx="4" fill="#172024" stroke="#52606a" stroke-width="1"/>
+<text x="550" y="671" fill="#d9ab91" font-family="DejaVu Sans" font-size="13" font-weight="bold" text-anchor="middle">D</text>
+<text x="576" y="672" fill="#d9ab91" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Damage</text>
+<text x="795" y="672" fill="#d3dade" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Brann-Azeroth</text>
+<text x="1498" y="672" fill="#9cabb3" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="end">Damage</text>
+<text x="515" y="741" fill="#e8d09b" font-family="DejaVu Serif" font-size="23" font-weight="bold" text-anchor="start">Unmatched individuals</text>
+<rect x="841" y="719" width="33" height="28" rx="12" fill="#303329" stroke="#6d654c" stroke-width="1"/>
+<text x="857" y="739" fill="#e1ca94" font-family="DejaVu Sans" font-size="16" font-weight="bold" text-anchor="middle">3</text>
+<text x="1518" y="738" fill="#99a8b0" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="end">Waiting for compatible players</text>
+<rect x="511" y="760" width="1015" height="222" rx="6" fill="#192126" stroke="#3c484f" stroke-width="1"/>
+<text x="535" y="791" fill="#83959e" font-family="DejaVu Sans" font-size="12" font-weight="normal" text-anchor="start" letter-spacing="1.2">GUILD MEMBER</text>
+<text x="820" y="791" fill="#83959e" font-family="DejaVu Sans" font-size="12" font-weight="normal" text-anchor="start" letter-spacing="1.2">ROLES</text>
+<text x="1066" y="791" fill="#83959e" font-family="DejaVu Sans" font-size="12" font-weight="normal" text-anchor="start" letter-spacing="1.2">DUNGEONS</text>
+<path d="M530 807 L1505 807" fill="none" stroke="#344047" stroke-width="1" stroke-linecap="round"/>
+<text x="536" y="837" fill="#d0d8dc" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Kael-Azeroth</text>
+<text x="820" y="837" fill="#b9c5cb" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Tank</text>
+<text x="1066" y="837" fill="#a6b4bc" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Shadowfang Keep</text>
+<path d="M535 858 L1502 858" fill="none" stroke="#2b363c" stroke-width="1" stroke-linecap="round"/>
+<text x="536" y="893" fill="#d0d8dc" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Mira-Azeroth</text>
+<text x="820" y="893" fill="#b9c5cb" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Healer / Damage</text>
+<text x="1066" y="893" fill="#a6b4bc" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Blackfathom Deeps</text>
+<path d="M535 914 L1502 914" fill="none" stroke="#2b363c" stroke-width="1" stroke-linecap="round"/>
+<text x="536" y="949" fill="#d0d8dc" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Vex-Azeroth</text>
+<text x="820" y="949" fill="#b9c5cb" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">Damage</text>
+<text x="1066" y="949" fill="#a6b4bc" font-family="DejaVu Sans" font-size="16" font-weight="normal" text-anchor="start">The Deadmines, Shadowfang Keep</text>
+<path d="M76 999 L1524 999" fill="none" stroke="#494c40" stroke-width="1" stroke-linecap="round"/>
+<rect x="97" y="1011" width="19" height="19" rx="4" fill="#29342c" stroke="#779175" stroke-width="1"/>
+<text x="106.5" y="1025" fill="#d8cb9e" font-family="DejaVu Sans" font-size="13" font-weight="bold" text-anchor="middle">i</text>
+<text x="130" y="1027" fill="#c5c9bb" font-family="DejaVu Sans" font-size="17" font-weight="normal" text-anchor="start">Suggestions only. No party is created. Form your party manually, then leave the queue.</text>
+<text x="50" y="1089" fill="#85959e" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="start">Concept mockup — not an in-game screenshot. Styling is illustrative; all names and queue entries are examples.</text>
+<text x="1550" y="1089" fill="#b6a075" font-family="DejaVu Sans" font-size="15" font-weight="normal" text-anchor="end">/gq</text>
+</svg>

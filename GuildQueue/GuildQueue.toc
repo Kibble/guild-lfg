@@ -1,0 +1,13 @@
+## Interface: 16001
+## Title: Guild Queue
+## Notes: Guild-only dungeon queue and suggested groups. Party invitations only on click.
+## Author: Guild Queue contributors
+## Version: 0.4.0
+## SavedVariablesPerCharacter: GuildQueueDB
+
+Catalog.lua
+Protocol.lua
+State.lua
+Matcher.lua
+UI.lua
+Core.lua

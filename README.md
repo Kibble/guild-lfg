@@ -1,12 +1,20 @@
 # Guild Queue — WoW:Forever addon
 
-**Version 0.6.0 — draft; the Questing tab needs in-client visual and multiplayer verification.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
+**Version 0.7.0 — draft; the bottom-tab layout needs in-client visual verification.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
 
 ## Screenshot
 
 ![Guild Queue in game, showing role icons, dungeon selections, and a queued guild member](docs/images/guild-queue.png)
 
-The screenshot shows an earlier native-UI build; the new Questing tab is not pictured.
+The screenshot shows an earlier native-UI build. The current window has two bottom navigation tabs: **Dungeons**, then **Quests**.
+
+### Bottom-tab previews
+
+These are mockups, not in-game captures; native tab artwork and fonts are approximated.
+
+![Dungeons page with queue controls and Dungeons selected along the bottom](mockups/GuildQueue-bottom-dungeons-mockup.png)
+
+![Full-width Quests page with Quests selected along the bottom](mockups/GuildQueue-bottom-quests-mockup.png)
 
 ## What it does
 
@@ -15,9 +23,9 @@ The screenshot shows an earlier native-UI build; the new Questing tab is not pic
 - Join a shared queue visible to guild members running the same addon version.
 - Suggest five-player groups: **one tank, one healer, three damage dealers**. Each player fills exactly one of their selected roles, and all five must share at least one selected dungeon.
 - Display **native WoW styling**: dialog borders, dark panels, gold headings, standard panel buttons, checkboxes, close-button artwork, and scroll knobs. Show queue counters, a live count of recently heard-from guild members with the addon, and scrollable selections.
-- Highlight **your suggested group** with five player tiles showing their **assigned-role icons**. Show other groups, **unmatched individual cards**, and an **all queued members** tab. Individual cards show an icon for each selected role; your group's tiles also show selected-role icons below the name. Each player appears in at most one suggestion.
+- Highlight **your suggested group** with five player tiles showing their **assigned-role icons**. Show other groups, **unmatched individual cards**, and an **all queued members** view within Dungeons. Individual cards show an icon for each selected role; your group's tiles also show selected-role icons below the name. Each player appears in at most one suggestion.
 - Show full character names, roles, and dungeon selections in hover tooltips while keeping card text bounded.
-- Browse a **Questing** tab listing online guildmates in your zone, their levels, and shared active quests. Expand a member's card to compare your completion status with theirs.
+- Switch between the **Dungeons** and **Quests** bottom tabs. Dungeons contains queue selections and the **Groups + individuals** / **All queued** view filters; Quests hides those controls and uses the full content area for online guildmates in your zone, their levels, and shared active quests. Expand a member's card to compare your completion status with theirs.
 - **Quest sharing is off by default.** Only consenting addon users send their zone ID, level, active quest IDs and completion flags. Guild-roster zones can still show members without the addon; unavailable quest data is never reported as zero shared quests.
 - Show **Create party** on your own suggested group. Clicking it requests invitations for the other four players; each must accept through WoW.
 - Disable **Create party** while you are already in a party or raid. Hovering the disabled button explains: **"You are already in a party or raid. Leave your current group to create a new party."** The button updates as you join or leave a group.
@@ -29,21 +37,23 @@ Players explicitly leave the queue when no longer looking. Requesting invitation
 
 ## Install
 
-[Download GuildQueue-0.6.0.zip](GuildQueue-0.6.0.zip) and extract the `GuildQueue` folder.
+[Download GuildQueue-0.7.0.zip](GuildQueue-0.7.0.zip) and extract the `GuildQueue` folder.
 
 1. Close the game client.
 2. Extract the download and copy its **`GuildQueue` folder** into your Forever installation's `Interface/AddOns` directory. The resulting file must be `Interface/AddOns/GuildQueue/GuildQueue.toc`.
 3. Start Forever and enable **Guild Queue** in the AddOns list.
 4. Have participating guild members install the same version.
-5. Type **`/gq`** (or `/guildqueue`). Select roles and dungeons, then click **Join queue**.
+5. Type **`/gq`** (or `/guildqueue`). On the **Dungeons** bottom tab, select roles and dungeons, then click **Join queue**.
 6. When a suggested group includes you, click **Create party** to invite the others, provided you are not already grouped. Leave the queue once you have formed your party.
-7. For questing, open **Questing**. Optionally enable **Share my zone and active quests with my guild** so guildmates can compare against your quest log. Viewing other members' shared data does not require sharing your own.
+7. For questing, open the **Quests** bottom tab. Optionally enable **Share my zone and active quests with my guild** so guildmates can compare against your quest log. Viewing other members' shared data does not require sharing your own.
 
 Additional commands: `/gq join` uses your current selections; `/gq leave` withdraws; `/gq status` explains readiness and reports whether guild membership, guild information, character information, and addon messaging are available. Hovering **Join queue** explains why it is disabled. Role and dungeon selections are saved per character. Active queue membership is **not** saved: after login or `/reload`, explicitly join again. Clearing the last selected role or dungeon while queued withdraws you.
 
 Use Battle.net's **Show in Explorer** to find your installation; the launch client's folder is normally `_forever_`. Other files in this download are development files and do not need to be installed.
 
 **Updating from an earlier version:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
+
+**Bottom tabs in 0.7.0:** replaces the top-level Questing button with native WoW bottom navigation tabs, **Dungeons** first and **Quests** second. Dungeons is initially selected. Quests uses the full content area, hiding the dungeon sidebar and queue-view filters. Returning to Dungeons restores the last selected queue view and scroll position. Switching pages does not join/leave the queue, change selections, enable quest sharing, or send invitations.
 
 **Questing in 0.6.0:** adds same-zone guild members and expandable shared-quest lists. See the sharing details below. The dungeon queue and click-only party action are unchanged; questing does not create parties or automatically queue anyone.
 
@@ -71,7 +81,7 @@ Dungeon selections are preferences, **not eligibility checks**: this version doe
 
 ## Questing and privacy
 
-The Questing tab uses cached online guild-roster zones plus recently shared map IDs. It excludes your own character. Members without this addon or with sharing disabled can appear through roster data, with **Quest data unavailable**. Missing local quest APIs, incomplete incoming snapshots, and expired peer data also do not imply zero shared quests. A confirmed empty log or no overlapping quest IDs does show zero.
+The Quests tab uses cached online guild-roster zones plus recently shared map IDs. It excludes your own character. Members without this addon or with sharing disabled can appear through roster data, with **Quest data unavailable**. Missing local quest APIs, incomplete incoming snapshots, and expired peer data also do not imply zero shared quests. A confirmed empty log or no overlapping quest IDs does show zero.
 
 Sharing is **per character and off by default**. Enabling it sends only your zone map ID, level, active visible quest IDs and complete/incomplete flags over the same **GUILD addon channel**. It sends no coordinates, quest history, titles, objective text or objective counts. Shared titles are read from your own quest log, in your client's language. No OpenMap, Questie, external library or server is required. This uses the same general roster-plus-addon-message approach as [OpenMap](https://github.com/openmap-world/openmap/blob/main/OpenMap/Map/Friends.lua), independently implemented for GuildQueue.
 
@@ -87,7 +97,7 @@ Automated Lua tests are included in `tests/run.lua`, covering protocol validatio
 
 Run from the project root with **Lua 5.1**: `lua5.1 tests/run.lua` and `lua5.1 tests/questing.lua`. Lua is a development tool only and is not required by players.
 
-**Current status:** all **115 automated tests passed** under **Lua 5.1.5** (80 core/UI tests and 35 quest protocol tests), including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Questing tests cover same-zone roster fallback, unavailable versus zero data, opt-in and withdrawal, strict guild filtering, log/zone changes, multipart limits/ordering/expiry, copy safety, cancellation of unsent fragments, scheduler rate limits, expansion and independent tab scrolling. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
+**Current status:** all **117 automated tests passed** under **Lua 5.1.5** (82 core/UI tests and 35 quest protocol tests), including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Questing tests cover same-zone roster fallback, unavailable versus zero data, opt-in and withdrawal, strict guild filtering, log/zone changes, multipart limits/ordering/expiry, copy safety, cancellation of unsent fragments, scheduler rate limits, expansion, independent tab scrolling, native bottom-tab order and selection, full-width Quests layout, and restoring the last dungeon view. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
 
 Before wider use, test with at least five addon-equipped guild characters:
 
@@ -97,7 +107,7 @@ Before wider use, test with at least five addon-equipped guild characters:
 4. Verify that matching and queue updates never issue invitations. Click **Create party** while solo and verify that exactly the other four players receive invitations and must accept manually.
 5. Join a party or raid and verify that **Create party** is disabled and its tooltip explains why. Leave the party and verify that the button becomes available again. Also test stale suggestions, combat, declined invitations, and players disconnecting during the action.
 6. Test messaging during combat/loading and any account restrictions, plus guild departure/rejoining and alongside other addons.
-7. Verify native borders/buttons/checkboxes, role selector icons and checkmarks, card text and role icons, hovered full-name/dungeon tooltips, both tabs, mouse-wheel/track scrolling, and small-screen scaling. Change selected roles while queued and confirm icons update without stale selections. Check that the addon-online count includes the local client and updates as other addon users load, leave, or disconnect; offline users may remain counted for up to 75 seconds.
+7. Verify native borders/buttons/checkboxes, role selector icons and checkmarks, card text and role icons, hovered full-name/dungeon tooltips, both bottom pages and the dungeon view filters, mouse-wheel/track scrolling, and small-screen scaling. Change selected roles while queued and confirm icons update without stale selections. Check that the addon-online count includes the local client and updates as other addon users load, leave, or disconnect; offline users may remain counted for up to 75 seconds.
 
 8. With two updated guild clients, verify zone filtering and opt-in sharing in both directions. Accept, finish, abandon and turn in quests; verify shared lists and status refresh. Turn sharing off, disconnect and change guilds; verify withdrawal, expiry and data clearing. Test members without the addon and players in different layers of the same zone.
 
@@ -108,7 +118,7 @@ Before wider use, test with at least five addon-equipped guild characters:
 - `State.lua`: live queue, revision ordering, withdrawals, expiry.
 - `Matcher.lua`: deterministic role-compatible group suggestions.
 - `Questing.lua`: bounded multipart quest snapshots, validation, revision ordering, withdrawal, expiry, and shared-quest comparison.
-- `UI.lua`: native WoW styling/controls and role icons, pooled group/member/individual cards, counters, tooltips, and scrollable selections/views.
+- `UI.lua`: native WoW controls and role icons, Dungeons/Quests bottom tabs, pooled cards, counters, tooltips, and independently scrollable page/view state.
 - `Core.lua`: client events, guild identity and guild-channel validation, throttled queue/presence synchronization, guarded click-only invitation requests, and diagnostic commands.
 
 ## Compatibility references

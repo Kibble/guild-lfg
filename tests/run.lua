@@ -1045,9 +1045,26 @@ local function openUI(c)
                 "checkedTexture", "disabledCheckedTexture" }) do
                 control[key] = control:CreateTexture(nil, "ARTWORK")
             end
+        elseif template == "PanelTabButtonTemplate" then
+            control.Text = control:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            control:SetFontString(control.Text)
+            for _, key in ipairs({ "Left", "Middle", "Right", "LeftActive", "MiddleActive", "RightActive" }) do
+                control[key] = control:CreateTexture(nil, "BACKGROUND")
+            end
         end
         return control
     end
+    local function nativeTabState(control, selected)
+        control.nativeSelected = selected
+        control:SetEnabled(not selected)
+        control.Text:SetPoint("CENTER", control, "CENTER", 0, selected and -3 or 2)
+        for _, key in ipairs({ "Left", "Middle", "Right" }) do
+            control[key]:SetShown(not selected)
+            control[key .. "Active"]:SetShown(selected)
+        end
+    end
+    c.env.PanelTemplates_SelectTab = function(control) nativeTabState(control, true) end
+    c.env.PanelTemplates_DeselectTab = function(control) nativeTabState(control, false) end
     local ui = assert(loadfile("GuildQueue/UI.lua"))
     setfenv(ui, c.env)
     ui("GuildQueue", c.ns)
@@ -1278,7 +1295,7 @@ test("UI uses native WoW borders, buttons, checkboxes and close-button artwork",
     equal(close.text, "") -- Native X texture, not a second text-based X.
     equal(main.backdrop.edgeFile, "Interface\\DialogFrame\\UI-DialogBox-Border")
     equal(main:GetWidth(), 1060)
-    equal(main:GetHeight(), 740)
+    equal(main:GetHeight(), 780)
 end)
 test("own suggested group renders five assigned member tiles and a click-only action", function()
     local c = client()
@@ -1366,10 +1383,18 @@ test("card labels have explicit bounds within their visible parent panels", func
     for _, control in ipairs(widgets) do
         if control.frameType == "FontString" and visible(control) then
             local point, parent = control.point, control.parent
-            assert(point and point[1] == "TOPLEFT" and parent)
+            assert(point and parent)
             assert(control:GetWidth() > 0 and control:GetHeight() > 0)
-            assert(point[2] + control:GetWidth() <= parent:GetWidth(), control.text)
-            assert(-point[3] + control:GetHeight() <= parent:GetHeight(), control.text)
+            if parent.template == "PanelTabButtonTemplate" then
+                equal(point[1], "CENTER")
+                assert(control == parent.Text)
+                assert(control:GetWidth() <= parent:GetWidth())
+                assert(control:GetHeight() + 2 * math.abs(point[5]) <= parent:GetHeight())
+            else
+                equal(point[1], "TOPLEFT")
+                assert(point[2] + control:GetWidth() <= parent:GetWidth(), control.text)
+                assert(-point[3] + control:GetHeight() <= parent:GetHeight(), control.text)
+            end
         end
     end
 end)
@@ -1483,6 +1508,60 @@ test("role icons stay inside their visible selectors and listing tiles", functio
         end
     end
     assert(count >= 13) -- Three selectors, five assigned icons, five preference icons.
+end)
+test("exactly two native bottom tabs are Dungeons then Quests and swap entire pages", function()
+    local c = client()
+    c.ns.SetQueued(true)
+    c:advance(1)
+    local widgets, tabs, sidebar, scroll, mainTabs = openUI(c), {}, nil, nil, {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+        if control.mainTab then mainTabs[#mainTabs + 1] = control end
+        if control.guildQueueKind == "dungeonSidebar" then sidebar = control end
+        if control.guildQueueKind == "outputScroll" then scroll = control end
+    end
+    equal(#mainTabs, 2)
+    equal(mainTabs[1].text, "Dungeons")
+    equal(mainTabs[2].text, "Quests")
+    assert(mainTabs[1].point[2] < mainTabs[2].point[2])
+    for _, tab in ipairs(mainTabs) do
+        equal(tab.template, "PanelTabButtonTemplate")
+        assert(-tab.point[3] > tab.parent:GetHeight() * 0.9)
+        assert(-tab.point[3] + tab:GetHeight() <= tab.parent:GetHeight())
+    end
+    assert(tabs.dungeons.nativeSelected and not tabs.questing.nativeSelected)
+    tabs.questing.scripts.OnClick(tabs.questing)
+    assert(tabs.questing.nativeSelected and not tabs.dungeons.nativeSelected)
+    assert(not sidebar.shown and not tabs.groups.shown and not tabs.queue.shown)
+    equal(scroll.point[2], 18)
+    equal(scroll:GetHeight(), 574)
+    equal(scroll.content:GetWidth(), 1006)
+    tabs.dungeons.scripts.OnClick(tabs.dungeons)
+    assert(sidebar.shown and tabs.groups.shown and tabs.queue.shown)
+    equal(scroll.point[2], 296)
+    equal(scroll:GetHeight(), 530)
+    assert(c.ns.queued and not c.ns.prefs.shareQuests)
+    equal(#c.invites, 0)
+end)
+test("returning from Quests preserves the selected dungeon view and scroll position", function()
+    local c = client()
+    for index = 1, 30 do
+        c:receive("D" .. index .. "-TestRealm", packet(1, 4, nil, c.now, c.now))
+    end
+    local widgets, tabs, scroll = openUI(c), {}, nil
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+        if control.guildQueueKind == "outputScroll" then scroll = control end
+    end
+    tabs.queue.scripts.OnClick(tabs.queue)
+    scroll.scripts.OnMouseWheel(scroll, -5)
+    local previous = scroll:GetVerticalScroll()
+    assert(previous > 0)
+    tabs.questing.scripts.OnClick(tabs.questing)
+    tabs.dungeons.scripts.OnClick(tabs.dungeons)
+    assert(tabs.queue.selected and not tabs.groups.selected)
+    equal(scroll:GetVerticalScroll(), previous)
+    assert(tabs.dungeons.nativeSelected)
 end)
 test("native tab buttons keep the active view pressed", function()
     local c = client()

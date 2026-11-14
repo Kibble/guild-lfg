@@ -1,12 +1,13 @@
 local _, ns = ...
-local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, questTab
+local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, dungeonTab, questTab
+local sidebar, queueViewStatus
 local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
 local expandedQuests = {}
 local roleChecks, dungeonChecks, counters = {}, {}, {}
-local mode, hovered, pendingScroll = "groups", nil, nil
+local mode, dungeonMode, hovered, pendingScroll = "groups", "groups", nil, nil
 local scrollPositions = { groups = 0, queue = 0, questing = 0 }
 local pools = { groups = {}, people = {}, headings = {}, empty = {}, questing = {} }
-local CONTENT_WIDTH = 728
+local CONTENT_WIDTH, QUEST_WIDTH = 728, 1006
 local C = {
     background = { 0.025, 0.025, 0.025 }, panel = { 0.035, 0.035, 0.035 },
     card = { 0.045, 0.045, 0.045 }, tile = { 0.025, 0.025, 0.025 },
@@ -151,6 +152,10 @@ local function paint(control)
     if control.guildQueueKind == "scrollbar" then
         surface(control, C.background)
     elseif control.guildQueueKind == "tab" then
+        if control.mainTab then
+            if control.selected then PanelTemplates_SelectTab(control) else PanelTemplates_DeselectTab(control) end
+            return -- Native bottom tabs own their active/inactive fonts and artwork.
+        end
         control:SetButtonState(control.selected and "PUSHED" or "NORMAL", control.selected == true)
     end
     colorText(control.caption, control:IsEnabled() and C.heading or C.dim)
@@ -191,6 +196,18 @@ local function button(parent, text, x, y, width, height, callback, kind)
     control:SetScript("OnClick", callback)
     bindHover(control, nil, true)
     paint(control)
+    return control
+end
+
+local function bottomTab(parent, text, x, callback, tabMode)
+    local control = CreateFrame("Button", nil, parent, "PanelTabButtonTemplate")
+    place(control, x, 742, 128, 32)
+    control.guildQueueKind, control.mainTab, control.mode = "tab", true, tabMode
+    control:SetText(text)
+    control.caption = control.Text
+    control.Text:SetWidth(104)
+    control.Text:SetHeight(18)
+    control:SetScript("OnClick", callback)
     return control
 end
 
@@ -248,6 +265,13 @@ local function scrollArea(parent, x, y, width, height, kind)
         scroll.track:SetShown(maximum > 0)
     end
     scroll.update = update
+    scroll.layout = function(nextX, nextY, nextWidth, nextHeight)
+        width, height = nextWidth, nextHeight
+        place(scroll, nextX, nextY, width - 14, height)
+        scroll.content:SetWidth(width - 18)
+        place(scroll.track, nextX + width - 16, nextY, 16, height)
+        update()
+    end
     local function wheel(_, delta)
         clearHover()
         scroll:SetVerticalScroll(math.max(0, scroll:GetVerticalScroll() - delta * 42))
@@ -389,7 +413,8 @@ local function heading(text, detail, y)
     return y + 32
 end
 
-local function emptyCard(title, text, y)
+local function emptyCard(title, text, y, width)
+    width = width or CONTENT_WIDTH
     local card = acquire(pools.empty, function()
         local control = panel(outputScroll.content, 0, 0, CONTENT_WIDTH, 90, C.card)
         control.guildQueueKind = "empty"
@@ -397,7 +422,9 @@ local function emptyCard(title, text, y)
         control.text = label(control, "", 18, 43, 692, 32, nil, C.muted, true)
         return control
     end)
-    place(card, 0, y, CONTENT_WIDTH, 90)
+    place(card, 0, y, width, 90)
+    card.title:SetWidth(width - 36)
+    card.text:SetWidth(width - 36)
     card.title:SetText(title)
     card.text:SetText(text)
     return y + 102
@@ -428,13 +455,13 @@ local function renderPeople(players, y)
 end
 
 local function newQuestCard()
-    local card = panel(outputScroll.content, 0, 0, CONTENT_WIDTH, 78, C.card)
+    local card = panel(outputScroll.content, 0, 0, QUEST_WIDTH, 78, C.card)
     card.guildQueueKind, card.lines = "questMember", {}
-    card.name = label(card, "", 12, 10, 490, 22, "GameFontNormal", C.text)
-    card.level = label(card, "", 510, 10, 202, 22, nil, C.muted)
+    card.name = label(card, "", 12, 10, QUEST_WIDTH - 238, 22, "GameFontNormal", C.text)
+    card.level = label(card, "", QUEST_WIDTH - 218, 10, 202, 22, nil, C.muted)
     card.level:SetJustifyH("RIGHT")
-    card.summary = label(card, "", 12, 40, 532, 24, nil, C.muted)
-    card.expand = button(card, "Show quests", 552, 36, 160, 28, function()
+    card.summary = label(card, "", 12, 40, QUEST_WIDTH - 196, 24, nil, C.muted)
+    card.expand = button(card, "Show quests", QUEST_WIDTH - 176, 36, 160, 28, function()
         if card.member then
             local key = (ns.guildKey or "") .. ":" .. card.member.name
             expandedQuests[key] = not expandedQuests[key]
@@ -451,7 +478,7 @@ local function renderQuesting()
     local members, y = ns.GetQuestingPlayers(), 110
     if #members == 0 then
         return emptyCard("No guildmates found in your zone",
-            "Guild roster information can take a moment to arrive. Quest details require a guildmate using this version with sharing enabled.", y)
+            "Guild roster information can take a moment to arrive. Quest details require a guildmate using this version with sharing enabled.", y, QUEST_WIDTH)
     end
     for _, member in ipairs(members) do
         local card = acquire(pools.questing, newQuestCard)
@@ -469,17 +496,17 @@ local function renderQuesting()
         card.tooltipText = "Same zone does not guarantee the same layer or phase. "
             .. (count and "Quest details reflect recently shared snapshots." or "Quest sharing is optional, or data has expired/is still loading.")
         local used = expanded and count or 0
-        place(card, 0, y, CONTENT_WIDTH, 78 + used * 44)
+        place(card, 0, y, QUEST_WIDTH, 78 + used * 44)
         for index = 1, used do
             local line = card.lines[index]
             if not line then
-                line = { title = label(card, "", 16, 0, 696, 20, "GameFontNormal", C.heading),
-                    status = label(card, "", 16, 0, 696, 18, nil, C.muted) }
+                line = { title = label(card, "", 16, 0, QUEST_WIDTH - 32, 20, "GameFontNormal", C.heading),
+                    status = label(card, "", 16, 0, QUEST_WIDTH - 32, 18, nil, C.muted) }
                 card.lines[index] = line
             end
             local quest = member.shared[index]
-            place(line.title, 16, 76 + (index - 1) * 44, 696, 20)
-            place(line.status, 16, 96 + (index - 1) * 44, 696, 18)
+            place(line.title, 16, 76 + (index - 1) * 44, QUEST_WIDTH - 32, 20)
+            place(line.status, 16, 96 + (index - 1) * 44, QUEST_WIDTH - 32, 18)
             line.title:SetText(ns.SafeText(quest.title))
             line.status:SetText("You: " .. (quest.localComplete and "Ready to turn in" or "In progress")
                 .. "  |  Guildmate: " .. (quest.peerComplete and "Ready to turn in" or "In progress"))
@@ -559,6 +586,16 @@ end
 
 function ns.RefreshUI()
     if not frame or not frame:IsShown() then return end
+    local questing = mode == "questing"
+    sidebar:SetShown(not questing)
+    groupsTab:SetShown(not questing)
+    queueTab:SetShown(not questing)
+    queueViewStatus:SetShown(not questing)
+    if questing then
+        outputScroll.layout(18, 112, 1024, 574)
+    else
+        outputScroll.layout(296, 156, 746, 530)
+    end
     local players = ns.state:Sorted()
     guildLabel:SetText(ns.SafeText(ns.guildName or "No guild"))
     status:SetText(ns.SafeText(ns.StatusText()))
@@ -586,10 +623,11 @@ function ns.RefreshUI()
     end
     selectionCount:SetText(selected .. " selected")
     groupsTab.selected, queueTab.selected = mode == "groups", mode == "queue"
-    questTab.selected = mode == "questing"
+    dungeonTab.selected, questTab.selected = not questing, questing
     queueTab:SetText("All queued (" .. #players .. ")")
     paint(groupsTab)
     paint(queueTab)
+    paint(dungeonTab)
     paint(questTab)
     renderOutput(players)
     if hovered and hovered:IsShown() and hovered.tooltip then hovered.tooltip(hovered) end
@@ -597,21 +635,25 @@ end
 
 local function switchTab(nextMode)
     clearHover()
+    if nextMode == "dungeons" then nextMode = dungeonMode end
     if nextMode ~= mode then
         scrollPositions[mode] = outputScroll:GetVerticalScroll()
+        if mode ~= "questing" then dungeonMode = mode end
         mode = nextMode
+        if mode ~= "questing" then dungeonMode = mode end
         pendingScroll = scrollPositions[mode]
     end
     ns.RefreshUI()
 end
 
 local function fitScreen()
-    frame:SetScale(math.min(1, UIParent:GetWidth() / 1100, UIParent:GetHeight() / 780))
+    frame:SetScale(math.min(1, UIParent:GetWidth() / 1100, UIParent:GetHeight() / 820))
 end
 
 local function createUI()
     frame = CreateFrame("Frame", "GuildQueueFrame", UIParent, "BackdropTemplate")
-    frame:SetSize(1060, 740)
+    frame:SetSize(1060, 780)
+    frame.minTabWidth, frame.maxTabWidth = 128, 128
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
     frame:SetClampedToScreen(true)
@@ -643,7 +685,8 @@ local function createUI()
     queueStatus:SetJustifyH("CENTER")
     button(frame, "", 1027, 0, 32, 32, function() frame:Hide() end, "close")
 
-    local sidebar = panel(frame, 18, 112, 260, 574, C.panel)
+    sidebar = panel(frame, 18, 112, 260, 574, C.panel)
+    sidebar.guildQueueKind = "dungeonSidebar"
     label(sidebar, "YOUR QUEUE", 14, 12, 230, 18, "GameFontNormalSmall", C.heading)
     label(sidebar, "Play as", 14, 36, 105, 22, "GameFontNormalLarge", C.text)
     label(sidebar, "Choose 1 or more", 122, 39, 124, 18, nil, C.muted)
@@ -700,25 +743,26 @@ local function createUI()
     queueTab = button(frame, "All queued", 510, 112, 166, 32,
         function() switchTab("queue") end, "tab")
     queueTab.mode = "queue"
-    questTab = button(frame, "Questing", 684, 112, 136, 32,
-        function() switchTab("questing") end, "tab")
-    questTab.mode = "questing"
-    label(frame, "Live guild queue", 864, 119, 178, 18, nil, C.green):SetJustifyH("RIGHT")
+    dungeonTab = bottomTab(frame, "Dungeons", 28, function() switchTab("dungeons") end, "dungeons")
+    questTab = bottomTab(frame, "Quests", 168, function() switchTab("questing") end, "questing")
+    queueViewStatus = label(frame, "Live guild queue", 864, 119, 178, 18, nil, C.green)
+    queueViewStatus:SetJustifyH("RIGHT")
     outputScroll = scrollArea(frame, 296, 156, 746, 530, "outputScroll")
     questToolbar = CreateFrame("Frame", nil, outputScroll.content)
-    place(questToolbar, 0, 0, CONTENT_WIDTH, 104)
-    questZone = label(questToolbar, "", 2, 0, 724, 26, "GameFontNormal", C.heading)
-    shareQuests = check(questToolbar, "Share my zone and active quests with my guild", 0, 32, 724, 28,
+    place(questToolbar, 0, 0, QUEST_WIDTH, 104)
+    questZone = label(questToolbar, "", 2, 0, QUEST_WIDTH - 4, 26, "GameFontNormal", C.heading)
+    shareQuests = check(questToolbar, "Share my zone and active quests with my guild", 0, 32, QUEST_WIDTH - 4, 28,
         function(self) ns.SetQuestSharing(self:GetChecked()) end, "questSharing")
     shareQuests.tooltipTitle = "Optional quest sharing"
     shareQuests.tooltipText = "Off by default. Share only zone ID, level, active quest IDs and completion states with your guild. No coordinates or quest history. Turning off withdraws your snapshot."
     label(questToolbar, "Guild roster zones can include members without this addon. Shared quest data expires after 75 seconds; same zone does not guarantee the same layer or phase.",
-        2, 66, 724, 32, nil, C.muted, true)
+        2, 66, QUEST_WIDTH - 4, 32, nil, C.muted, true)
     questToolbar:Hide()
     solid(frame, 18, 695, 1024, 1, C.border)
     status = label(frame, "", 24, 699, 1012, 14, nil, C.muted)
     label(frame, "Invites are sent only when you click Create party. Leave the queue once your party is formed.",
         24, 715, 1012, 14, nil, C.heading)
+    solid(frame, 18, 735, 1024, 1, C.border)
     frame:SetScript("OnShow", function()
         fitScreen()
         ns.RefreshUI()

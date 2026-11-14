@@ -10,6 +10,13 @@ local lastPartyInviteAt = -100
 ns.queued = false
 ns.state = ns.State.New()
 ns.groups, ns.individuals = {}, {}
+ns.questing = ns.Questing.New()
+local guildMembers, localQuests, questTitles = {}, nil, {}
+local localZoneID, localZoneName, localLevel = 0, "", 0
+local localDirty, lastLocalScan, lastRosterRequest = true, -100, -100
+local questBatch, questBatchIndex, questBatchSignature = nil, 1, nil
+local questSentSignature, questStopPending = nil, false
+local lastQuestSent, lastQuestPrepared = -100, -100
 
 local function secret(...)
     return hasanysecretvalues and hasanysecretvalues(...)
@@ -39,6 +46,128 @@ local function normalize(name)
     realm = realm:gsub("%s", "")
     if realm == "" then return nil end
     return character .. "-" .. realm
+end
+
+-- Optional APIs must not gate the dungeon queue or expose secret values.
+local function safeCall(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, value = pcall(fn, ...)
+    if ok and not secret(value) then return value end
+end
+
+local function boundedNumber(value, minimum, maximum)
+    return type(value) == "number" and value >= minimum and value <= maximum and value % 1 == 0
+end
+
+local function scanLocalQuests()
+    localDirty, lastLocalScan = false, GetTime()
+    localZoneID = safeCall(C_Map and C_Map.GetBestMapForUnit, "player")
+    if not boundedNumber(localZoneID, 1, 2147483647) then localZoneID = 0 end
+    -- A cave/micro-map belongs to its parent zone. Never compare continent IDs.
+    if C_Map and C_Map.GetMapInfo then
+        for _ = 1, 8 do
+            local info = safeCall(C_Map.GetMapInfo, localZoneID)
+            if type(info) ~= "table" or secret(info.mapType, info.parentMapID) then break end
+            local zoneType = Enum and Enum.UIMapType and Enum.UIMapType.Zone or 3
+            if boundedNumber(info.mapType, 0, zoneType - 1) then localZoneID = 0 break end
+            if not boundedNumber(info.mapType, zoneType + 1, 100)
+                or not boundedNumber(info.parentMapID, 1, 2147483647) then break end
+            localZoneID = info.parentMapID
+        end
+    end
+    local info = localZoneID > 0 and safeCall(C_Map and C_Map.GetMapInfo, localZoneID)
+    localZoneName = type(info) == "table" and not secret(info.name) and info.name or nil
+    if type(localZoneName) ~= "string" or localZoneName == "" then
+        localZoneName = safeCall(GetRealZoneText) or ""
+    end
+    localLevel = safeCall(UnitLevel, "player")
+    if not boundedNumber(localLevel, 0, 1000) then localLevel = 0 end
+    localQuests, questTitles = nil, {}
+    if not C_QuestLog or type(C_QuestLog.GetInfo) ~= "function"
+        or type(C_QuestLog.IsComplete) ~= "function" then return end
+    local count = safeCall(C_QuestLog.GetNumQuestLogEntries)
+    if not boundedNumber(count, 0, 1000) then return end
+    local quests, titles, total = {}, {}, 0
+    for index = 1, count do
+        local quest = safeCall(C_QuestLog.GetInfo, index)
+        if type(quest) ~= "table" or secret(quest.isHeader, quest.isHidden, quest.questID, quest.title) then return end
+        if not quest.isHeader and not quest.isHidden then
+            if not boundedNumber(quest.questID, 1, 2147483647) then return end
+            local complete = safeCall(C_QuestLog.IsComplete, quest.questID)
+            if type(complete) ~= "boolean" then return end
+            quests[quest.questID] = complete
+            titles[quest.questID] = type(quest.title) == "string" and quest.title or ("Quest " .. quest.questID)
+            total = total + 1
+            if total > 200 then return end
+        end
+    end
+    localQuests, questTitles = quests, titles
+end
+
+local function scanGuildMembers()
+    guildMembers = {}
+    if not ns.IsReady() or type(GetGuildRosterInfo) ~= "function" then return end
+    local count = safeCall(GetNumGuildMembers)
+    if not boundedNumber(count, 0, 10000) then return end
+    for index = 1, count do
+        local ok, name, _, _, level, _, area, _, _, online = pcall(GetGuildRosterInfo, index)
+        if ok and not secret(name, level, area, online) and online then
+            name = normalize(name)
+            if name and name:lower() ~= ns.playerName:lower() then
+                guildMembers[name:lower()] = { name = name,
+                    level = boundedNumber(level, 0, 1000) and level or 0,
+                    area = type(area) == "string" and area or "" }
+            end
+        end
+    end
+end
+
+function ns.QuestingZoneText()
+    return localZoneName ~= "" and localZoneName or "Unknown zone"
+end
+
+function ns.GetQuestingPlayers()
+    if not ns.IsReady() then return {} end
+    local now, rows, byName = GetServerTime(), {}, {}
+    for key, member in pairs(guildMembers) do
+        byName[key] = { name = member.name, level = member.level,
+            sameZone = localZoneName ~= "" and member.area == localZoneName }
+    end
+    for name, peer in pairs(ns.questing.peers) do
+        if now - peer.sentAt < ns.TIMEOUT and name:lower() ~= ns.playerName:lower() then
+            local key = name:lower()
+            local row = byName[key] or { name = name }
+            byName[key] = row
+            row.level, row.peer = peer.level, peer
+            if localZoneID > 0 and peer.zoneID > 0 then
+                row.sameZone = peer.zoneID == localZoneID
+            end
+        end
+    end
+    for _, row in pairs(byName) do
+        if row.sameZone then
+            if row.peer and localQuests then
+                row.shared = ns.Questing.Common(localQuests, row.peer.quests)
+                for _, quest in ipairs(row.shared) do
+                    quest.title = questTitles[quest.questID] or ("Quest " .. quest.questID)
+                end
+            end
+            rows[#rows + 1] = row
+        end
+    end
+    table.sort(rows, function(a, b) return a.name < b.name end)
+    return rows
+end
+
+function ns.SetQuestSharing(wanted)
+    wanted = wanted == true
+    if ns.prefs.shareQuests == wanted then return end
+    ns.prefs.shareQuests = wanted
+    -- Never let an already prepared snapshot escape after consent is withdrawn.
+    questBatch, questBatchSignature, questSentSignature = nil, nil, nil
+    questStopPending = not wanted
+    lastQuestSent, lastQuestPrepared, localDirty = -100, -100, true
+    ns.RefreshUI()
 end
 
 local function rebuild()
@@ -233,7 +362,11 @@ local function applyGuildIdentity(guildName, guildRealm)
         ns.state = ns.State.New()
         pendingStateAt, pendingHello, pendingPresence = nil, key ~= nil, key ~= nil
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
-        presence = {}
+        presence, guildMembers = {}, {}
+        ns.questing = ns.Questing.New()
+        questBatch, questBatchSignature, questSentSignature = nil, nil, nil
+        questStopPending, localDirty = false, true
+        lastQuestSent, lastQuestPrepared, lastRosterRequest = -100, -100, -100
         transportError = nil
         if key then
             -- A new revision tombstone clears any pre-reload queue entry.
@@ -302,13 +435,57 @@ local function sendState()
     return false
 end
 
+local function nextRevision()
+    ns.prefs.revision = math.max(ns.prefs.revision, GetServerTime() * 1000) + 1
+    return ns.prefs.revision
+end
+
+local function prepareQuestBatch(clock)
+    if questBatch or not ns.prefs.shareQuests or not localQuests
+        or clock - lastQuestPrepared < 5 then return end
+    local ids, parts = {}, { tostring(localZoneID), tostring(localLevel) }
+    for id in pairs(localQuests) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        parts[#parts + 1] = tostring(id) .. (localQuests[id] and ":1" or ":0")
+    end
+    local signature = table.concat(parts, ",")
+    if signature ~= questSentSignature or clock - lastQuestSent >= ns.HEARTBEAT then
+        questBatch = ns.Questing.Encode(nextRevision(), GetServerTime(), localZoneID, localLevel, localQuests)
+        questBatchIndex, questBatchSignature, lastQuestPrepared = 1, signature, clock
+    end
+end
+
+local function sendQuestPart(clock)
+    if questStopPending then
+        if send(ns.Questing.EncodeStop(nextRevision(), GetServerTime())) then
+            questStopPending = false
+        end
+    elseif questBatch then
+        -- Do not retry an expired multipart snapshot indefinitely after a restriction.
+        local packet = ns.Questing.Decode(questBatch[questBatchIndex])
+        if GetServerTime() - packet.sentAt >= ns.TIMEOUT then
+            questBatch = nil
+            return
+        end
+        if send(questBatch[questBatchIndex]) then
+            questBatchIndex = questBatchIndex + 1
+            if questBatchIndex > #questBatch then
+                questBatch, questSentSignature, lastQuestSent = nil, questBatchSignature, clock
+            end
+        end
+    end
+end
+
 local function tick()
     if not started then
         return
     end
     local clock = GetTime()
     updateGuild()
+    if localDirty or clock - lastLocalScan >= ns.HEARTBEAT then scanLocalQuests() end
     local serverNow = GetServerTime()
+    ns.questing:Prune(serverNow)
     if ns.state:Prune(serverNow) then
         rebuild()
     end
@@ -321,6 +498,11 @@ local function tick()
         ns.RefreshUI()
         return
     end
+    if clock - lastRosterRequest >= 30 then
+        lastRosterRequest = clock
+        safeCall(C_GuildInfo and C_GuildInfo.GuildRoster)
+    end
+    prepareQuestBatch(clock)
     if ns.queued and clock - lastSent >= ns.HEARTBEAT then
         requestState(0)
     elseif not ns.queued and clock - lastPresence >= ns.HEARTBEAT then
@@ -332,6 +514,9 @@ local function tick()
         if pendingStateAt and pendingStateAt <= clock then
             lastAttempt = clock
             sendState()
+        elseif questStopPending then
+            lastAttempt = clock
+            sendQuestPart(clock)
         elseif pendingHello and clock - lastHello >= 15 then
             lastAttempt = clock
             if send(ns.Protocol.Encode({ kind = "H" })) then
@@ -342,6 +527,9 @@ local function tick()
             if send(ns.Protocol.Encode({ kind = "P" })) then
                 pendingPresence, lastPresence = false, clock
             end
+        elseif questBatch then
+            lastAttempt = clock
+            sendQuestPart(clock)
         end
     end
     ns.RefreshUI()
@@ -363,16 +551,26 @@ local function receive(prefix, message, channel, sender)
     if not name or name:lower() == ns.playerName:lower() then
         return
     end
+    local now = GetServerTime()
+    local questPacket = ns.Questing.Decode(message)
+    if questPacket then
+        if questPacket.sentAt <= now + 5 and now - questPacket.sentAt < ns.TIMEOUT then
+            presence[name] = now
+            ns.questing:Apply(name, questPacket, now)
+            ns.RefreshUI()
+        end
+        return
+    end
     local packet = ns.Protocol.Decode(message)
     if not packet then
         return
     end
-    local now = GetServerTime()
     if packet.kind == "H" or packet.kind == "P" then
         presence[name] = now
-        if packet.kind == "H" and ns.queued and GetTime() - lastHelloReply >= 5 then
+        if packet.kind == "H" and GetTime() - lastHelloReply >= 5 then
             lastHelloReply = GetTime()
-            requestState(math.random(1, 5))
+            if ns.queued then requestState(math.random(1, 5)) end
+            if ns.prefs.shareQuests then lastQuestSent = -100 end
         end
         ns.RefreshUI()
     elseif packet.sentAt <= now + 5 and now - packet.sentAt < ns.TIMEOUT then
@@ -390,6 +588,7 @@ local function initialize()
         GuildQueueDB = {}
     end
     ns.prefs = GuildQueueDB
+    ns.prefs.shareQuests = ns.prefs.shareQuests == true
     if type(ns.prefs.roles) ~= "number" or ns.prefs.roles ~= ns.prefs.roles
         or ns.prefs.roles < 0 or ns.prefs.roles > 7 or ns.prefs.roles % 1 ~= 0 then
         ns.prefs.roles = 4
@@ -419,6 +618,8 @@ local function start()
     started = true
     identifyPlayer()
     updateGuild()
+    scanLocalQuests()
+    scanGuildMembers()
     ns.ticker = C_Timer.NewTicker(1, tick)
     printMessage("Loaded. Use /gq to open the guild dungeon queue.")
 end
@@ -438,8 +639,12 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "GUILD_ROSTER_UPDATE" then
         if started then
             updateGuild()
+            scanGuildMembers()
             ns.RefreshUI()
         end
+    elseif event == "QUEST_LOG_UPDATE" or event == "ZONE_CHANGED_NEW_AREA"
+        or event == "ZONE_CHANGED" or event == "ZONE_CHANGED_INDOORS" or event == "PLAYER_LEVEL_UP" then
+        localDirty = true
     elseif event == "PLAYER_GUILD_UPDATE" then
         local unit = ...
         if started and unit == "player" then
@@ -461,7 +666,8 @@ events:SetScript("OnEvent", function(_, event, ...)
 end)
 for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "CHAT_MSG_ADDON",
     "GUILD_ROSTER_UPDATE", "PLAYER_GUILD_UPDATE", "GROUP_ROSTER_UPDATE",
-    "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT" }) do
+    "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT", "QUEST_LOG_UPDATE",
+    "ZONE_CHANGED_NEW_AREA", "ZONE_CHANGED", "ZONE_CHANGED_INDOORS", "PLAYER_LEVEL_UP" }) do
     events:RegisterEvent(event)
 end
 

@@ -18,7 +18,7 @@ local function loadModule(ns, name)
 end
 local function pure()
     local ns = {}
-    for _, module in ipairs({ "Catalog", "Protocol", "State", "Matcher" }) do
+    for _, module in ipairs({ "Catalog", "Protocol", "State", "Matcher", "Questing" }) do
         loadModule(ns, module)
     end
     return ns
@@ -272,6 +272,8 @@ local function client(options)
         guild = "Test Guild", roster = options.roster or { "Self-TestRealm", "Friend-TestRealm" },
         result = 0, locked = false, homeGroup = false, instanceGroup = false, combat = false }
     c.guildInfoUnavailable, c.nameUnavailable = options.guildInfoUnavailable, options.nameUnavailable
+    c.zoneID, c.zoneName, c.level = 37, "Elwynn Forest", 23
+    c.questLog, c.rosterInfo, c.mapInfo = options.quests or {}, options.rosterInfo or {}, {}
     if options.noGuild then c.guild = nil end
     local env = setmetatable({}, { __index = _G })
     c.ns, c.env = pure(), env
@@ -302,7 +304,30 @@ local function client(options)
         return c.guild
     end
     env.GetNumGuildMembers = function() return #c.roster end
-    env.GetGuildRosterInfo = function(index) return c.roster[index] end
+    env.GetGuildRosterInfo = function(index)
+        local name = c.roster[index]
+        local info = c.rosterInfo[name]
+        if not info then return name end
+        return name, nil, nil, info.level or 23, nil, info.area, nil, nil, info.online ~= false
+    end
+    env.UnitLevel = function() return c.level end
+    env.GetRealZoneText = function() return c.zoneName end
+    env.C_Map = {
+        GetBestMapForUnit = function() return c.zoneID end,
+        GetMapInfo = function(id)
+            return c.mapInfo[id] or { mapID = id, name = c.zoneName, mapType = 3, parentMapID = 0 }
+        end,
+    }
+    env.C_QuestLog = {
+        GetNumQuestLogEntries = function() return #c.questLog end,
+        GetInfo = function(index) if not c.questAPIUnavailable then return c.questLog[index] end end,
+        IsComplete = function(id)
+            for _, quest in ipairs(c.questLog) do
+                if quest.questID == id then return quest.complete == true end
+            end
+            return false
+        end,
+    }
     env.hasanysecretvalues = function() return false end
     env.Enum = { SendAddonMessageResult = { Success = 0 } }
     env.DEFAULT_CHAT_FRAME = { AddMessage = function(_, text) c.messages[#c.messages + 1] = text end }
@@ -317,7 +342,7 @@ local function client(options)
         IsAddonMessagePrefixRegistered = function() return true end,
         InChatMessagingLockdown = function() return c.locked end,
         SendAddonMessage = function(prefix, text, channel)
-            c.sent[#c.sent + 1] = { prefix = prefix, text = text, channel = channel }
+            c.sent[#c.sent + 1] = { prefix = prefix, text = text, channel = channel, clock = c.clock }
             return c.result
         end,
     }
@@ -343,6 +368,14 @@ local function client(options)
     c:fire("ADDON_LOADED", "GuildQueue")
     c:fire("PLAYER_LOGIN")
     return c
+end
+
+local function receiveQuests(c, sender, quests, revision, zoneID, channel, prefix)
+    local messages = c.ns.Questing.Encode(revision or 1, c.now, zoneID or 37, 24, quests)
+    for _, message in ipairs(messages) do
+        c:fire("CHAT_MSG_ADDON", prefix or c.ns.PREFIX, message, channel or "GUILD", sender)
+    end
+    return messages
 end
 
 local function suggestedGroup(c)
@@ -568,6 +601,174 @@ test("idle addon users periodically broadcast guild-only presence without joinin
     end
     assert(presences >= 1)
 end)
+test("same-zone roster members include non-addon users without claiming zero shared quests", function()
+    local c = client({ roster = { "Self-TestRealm", "Friend-TestRealm", "Away-TestRealm", "Offline-TestRealm" },
+        rosterInfo = {
+            ["Self-TestRealm"] = { area = "Elwynn Forest" },
+            ["Friend-TestRealm"] = { area = "Elwynn Forest", level = 26 },
+            ["Away-TestRealm"] = { area = "Westfall" },
+            ["Offline-TestRealm"] = { area = "Elwynn Forest", online = false },
+        } })
+    local members = c.ns.GetQuestingPlayers()
+    equal(#members, 1)
+    equal(members[1].name, "Friend-TestRealm")
+    equal(members[1].level, 26)
+    equal(members[1].shared, nil)
+    assert(not c.ns.prefs.shareQuests)
+    c:advance(25)
+    for _, message in ipairs(c.sent) do assert(not c.ns.Questing.Decode(message.text)) end
+end)
+test("shared active quest IDs and completion states work independently of the dungeon queue", function()
+    local c = client({ quests = { { questID = 10, title = "A shared quest" },
+        { questID = 20, title = "Another shared quest", complete = true },
+        { questID = 30, title = "Only mine" }, { isHeader = true, title = "Zone" } } })
+    receiveQuests(c, "Friend-TestRealm", { [10] = true, [20] = false, [99] = true })
+    local members = c.ns.GetQuestingPlayers()
+    equal(#members, 1)
+    equal(#members[1].shared, 2)
+    equal(members[1].shared[1].title, "A shared quest")
+    equal(members[1].shared[1].localComplete, false)
+    equal(members[1].shared[1].peerComplete, true)
+    equal(members[1].shared[2].localComplete, true)
+    assert(not c.ns.queued)
+    equal(next(c.ns.state.records), nil)
+    equal(#c.invites, 0)
+end)
+test("quest snapshots require the exact guild channel, prefix, identity and freshness", function()
+    local c = client()
+    for _, channel in ipairs({ "WHISPER", "PARTY", "RAID", "OFFICER", "CHANNEL" }) do
+        receiveQuests(c, "Friend-TestRealm", { [10] = false }, 1, 37, channel)
+    end
+    receiveQuests(c, "Friend-TestRealm", {}, 1, 37, "GUILD", "OtherAddon")
+    receiveQuests(c, "Self Test Realm", { [10] = false })
+    equal(next(c.ns.questing.peers), nil)
+    local stale = c.ns.Questing.Encode(1, c.now - c.ns.TIMEOUT, 37, 23, {})[1]
+    c:fire("CHAT_MSG_ADDON", c.ns.PREFIX, stale, "GUILD", "Friend-TestRealm")
+    equal(next(c.ns.questing.peers), nil)
+    receiveQuests(c, "Friend-TestRealm", {})
+    assert(c.ns.questing.peers["Friend-TestRealm"])
+    c.guild = "New Guild"
+    c:fire("PLAYER_GUILD_UPDATE", "player")
+    equal(next(c.ns.questing.peers), nil)
+    equal(#c.ns.GetQuestingPlayers(), 0)
+end)
+test("opt-in publishes bounded guild-only quest snapshots and turning off cancels pending data", function()
+    local c = client({ quests = { { questID = 10, title = "Not sent in payload" } } })
+    c.ns.SetQuestSharing(true)
+    c:advance(7)
+    local snapshots = 0
+    for _, message in ipairs(c.sent) do
+        local p = c.ns.Questing.Decode(message.text)
+        if p and p.kind == "Q" then
+            snapshots = snapshots + 1
+            equal(p.zoneID, 37)
+            equal(p.quests[10], false)
+            assert(#message.text <= 255)
+            assert(not message.text:find("Not sent", 1, true))
+            equal(message.channel, "GUILD")
+        end
+    end
+    assert(snapshots > 0)
+    c.ns.SetQuestSharing(false)
+    local previous = #c.sent
+    c:advance(7)
+    local stopped = false
+    for index = previous + 1, #c.sent do
+        local p = c.ns.Questing.Decode(c.sent[index].text)
+        if p then equal(p.kind, "QX") stopped = true end
+    end
+    assert(stopped)
+    equal(#c.invites, 0)
+end)
+test("multipart publication is rate limited and consent withdrawal cancels unsent fragments", function()
+    local quests = {}
+    for id = 1, 200 do quests[id] = { questID = 2000000000 + id, title = "Quest " .. id } end
+    local c = client({ quests = quests })
+    c.ns.SetQueued(true)
+    c.ns.SetQuestSharing(true)
+    c:advance(4)
+    local fragments = 0
+    for _, message in ipairs(c.sent) do
+        local p = c.ns.Questing.Decode(message.text)
+        if p and p.kind == "Q" then
+            fragments = fragments + 1
+            assert(p.parts > 1)
+        end
+    end
+    assert(fragments > 0)
+    c.ns.SetQuestSharing(false)
+    local previous = #c.sent
+    c:advance(25)
+    for index = previous + 1, #c.sent do
+        local p = c.ns.Questing.Decode(c.sent[index].text)
+        assert(not p or p.kind == "QX")
+    end
+    local lastClock = -1
+    for _, message in ipairs(c.sent) do
+        assert(message.clock > lastClock, "more than one scheduled message in a second")
+        lastClock = message.clock
+    end
+    assert(c.ns.queued and c.ns.state.records[c.ns.playerName])
+    equal(#c.invites, 0)
+end)
+test("quest completion, abandonment, additions and zone changes publish replacement snapshots", function()
+    local c = client({ quests = { { questID = 10, title = "Old quest" } } })
+    c.ns.SetQuestSharing(true)
+    c:advance(7)
+    c.questLog = { { questID = 20, title = "New quest", complete = true } }
+    c.zoneID, c.zoneName = 52, "Westfall"
+    c:fire("QUEST_LOG_UPDATE")
+    c:fire("ZONE_CHANGED_NEW_AREA")
+    c:advance(7)
+    local receiver = c.ns.Questing.New()
+    for _, message in ipairs(c.sent) do
+        local p = c.ns.Questing.Decode(message.text)
+        if p then receiver:Apply("Self-TestRealm", p, c.now) end
+    end
+    local peer = assert(receiver.peers["Self-TestRealm"])
+    equal(peer.zoneID, 52)
+    equal(peer.quests[10], nil)
+    equal(peer.quests[20], true)
+end)
+test("quest log and zone changes replace the shared snapshot and expired data becomes unavailable", function()
+    local c = client({ quests = { { questID = 10, title = "Shared" } }, rosterInfo = {
+        ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    receiveQuests(c, "Friend-TestRealm", { [10] = false })
+    equal(#c.ns.GetQuestingPlayers()[1].shared, 1)
+    c.questLog = {}
+    c:fire("QUEST_LOG_UPDATE")
+    c:advance(1)
+    equal(#c.ns.GetQuestingPlayers()[1].shared, 0)
+    c:advance(c.ns.TIMEOUT)
+    equal(c.ns.GetQuestingPlayers()[1].shared, nil)
+    c.zoneID, c.zoneName = 52, "Westfall"
+    c:fire("ZONE_CHANGED_NEW_AREA")
+    c:advance(1)
+    equal(#c.ns.GetQuestingPlayers(), 0)
+end)
+test("local map normalization uses a zone parent without mistaking a continent for a zone", function()
+    local c = client()
+    receiveQuests(c, "Friend-TestRealm", {})
+    c.zoneID = 1000
+    c.mapInfo[1000] = { name = "Cave", mapType = 5, parentMapID = 37 }
+    c:fire("ZONE_CHANGED_INDOORS")
+    c:advance(1)
+    equal(#c.ns.GetQuestingPlayers(), 1)
+    c.mapInfo[37] = { name = "Continent", mapType = 2, parentMapID = 0 }
+    c:fire("ZONE_CHANGED_NEW_AREA")
+    c:advance(1)
+    equal(#c.ns.GetQuestingPlayers(), 0)
+end)
+test("unavailable quest APIs never advertise an empty quest log or disable dungeon queuing", function()
+    local c = client({ quests = { { questID = 10, title = "Shared" } } })
+    c.env.C_QuestLog = nil
+    c:fire("QUEST_LOG_UPDATE")
+    c.ns.SetQuestSharing(true)
+    c.ns.SetQueued(true)
+    c:advance(7)
+    assert(c.ns.state.records[c.ns.playerName])
+    for _, message in ipairs(c.sent) do assert(not c.ns.Questing.Decode(message.text)) end
+end)
 test("only the server-enforced guild transport and exact prefix admit peer state and presence", function()
     local c = client({ roster = {} })
     local p = packet(1, 1, nil, c.now, c.now)
@@ -739,11 +940,13 @@ test("slash commands toggle UI and explicitly join/leave", function()
     assert(not c.ns.queued)
 end)
 test("corrupt saved preferences are sanitized", function()
-    local c = client({ saved = { roles = 0 / 0, dungeons = { [1] = true, [999] = true }, revision = math.huge } })
+    local c = client({ saved = { roles = 0 / 0, dungeons = { [1] = true, [999] = true },
+        revision = math.huge, shareQuests = "yes" } })
     equal(c.ns.prefs.roles, 4)
     equal(c.ns.prefs.revision, 0)
     equal(c.ns.prefs.dungeons[999], nil)
     assert(c.ns.prefs.dungeons[1])
+    equal(c.ns.prefs.shareQuests, false)
 end)
 local function openUI(c)
     local widgets, methods = {}, {}
@@ -868,6 +1071,70 @@ test("UI header displays and refreshes the recent online-addon member count", fu
     equal(onlineCounter.text, "2")
     c:advance(c.ns.TIMEOUT)
     equal(onlineCounter.text, "1")
+end)
+test("Questing tab shows unknown versus zero shared quests and expands completion details", function()
+    local c = client({ quests = { { questID = 10, title = "A shared quest" } },
+        rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    local widgets = openUI(c)
+    local tabs, consent = {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+        if control.guildQueueKind == "questSharing" then consent = control end
+    end
+    assert(tabs.questing and consent and not consent:GetChecked())
+    tabs.questing.scripts.OnClick(tabs.questing)
+    local card
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "questMember" then card = control end
+    end
+    assert(card)
+    equal(card.summary.text, "Quest data unavailable")
+    receiveQuests(c, "Friend-TestRealm", {})
+    equal(card.summary.text, "0 shared active quests")
+    receiveQuests(c, "Friend-TestRealm", { [10] = true }, 2)
+    equal(card.summary.text, "1 shared active quest")
+    card.expand.scripts.OnClick(card.expand)
+    equal(card.lines[1].title.text, "A shared quest")
+    assert(card.lines[1].status.text:find("You: In progress", 1, true))
+    assert(card.lines[1].status.text:find("Guildmate: Ready to turn in", 1, true))
+    local count = #widgets
+    c.ns.RefreshUI()
+    equal(#widgets, count)
+    consent:SetChecked(true)
+    consent.scripts.OnClick(consent)
+    assert(c.ns.prefs.shareQuests)
+    tabs.groups.scripts.OnClick(tabs.groups)
+    assert(not card.shown)
+    equal(#c.invites, 0)
+end)
+test("Questing tab retains independent scrolling and keeps expanded text within cards", function()
+    local quests, peer = {}, {}
+    for id = 1, 15 do
+        quests[#quests + 1] = { questID = id, title = "Shared quest " .. id }
+        peer[id] = false
+    end
+    local c = client({ quests = quests })
+    receiveQuests(c, "Friend-TestRealm", peer)
+    local widgets, tabs, scroll, card = openUI(c), {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+        if control.guildQueueKind == "outputScroll" then scroll = control end
+    end
+    tabs.questing.scripts.OnClick(tabs.questing)
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "questMember" then card = control end
+    end
+    card.expand.scripts.OnClick(card.expand)
+    scroll.scripts.OnMouseWheel(scroll, -4)
+    local position = scroll:GetVerticalScroll()
+    assert(position > 0)
+    tabs.queue.scripts.OnClick(tabs.queue)
+    equal(scroll:GetVerticalScroll(), 0)
+    tabs.questing.scripts.OnClick(tabs.questing)
+    equal(scroll:GetVerticalScroll(), position)
+    for _, line in ipairs(card.lines) do
+        assert(-line.status.point[3] + line.status:GetHeight() <= card:GetHeight())
+    end
 end)
 test("UI opens and its multi-select controls drive the real queue", function()
     local c = client()
@@ -1006,7 +1273,7 @@ test("UI uses native WoW borders, buttons, checkboxes and close-button artwork",
         end
     end
     assert(surfaces > 3 and main and buttons >= 5)
-    equal(checks, 3 + #c.ns.DUNGEONS)
+    equal(checks, 4 + #c.ns.DUNGEONS) -- Roles, dungeons, and opt-in quest sharing.
     equal(close.template, "UIPanelCloseButton")
     equal(close.text, "") -- Native X texture, not a second text-based X.
     equal(main.backdrop.edgeFile, "Interface\\DialogFrame\\UI-DialogBox-Border")
@@ -1235,7 +1502,7 @@ test("native tab buttons keep the active view pressed", function()
 end)
 
 test("all addon chunks compile as Lua 5.1", function()
-    for _, module in ipairs({ "Catalog", "Protocol", "State", "Matcher", "UI", "Core" }) do
+    for _, module in ipairs({ "Catalog", "Protocol", "State", "Matcher", "Questing", "UI", "Core" }) do
         assert(loadfile("GuildQueue/" .. module .. ".lua"))
     end
 end)

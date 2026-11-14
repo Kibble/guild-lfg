@@ -1,10 +1,11 @@
 local _, ns = ...
-local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab
-local outputScroll, dungeonScroll, selectionCount
+local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, questTab
+local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
+local expandedQuests = {}
 local roleChecks, dungeonChecks, counters = {}, {}, {}
 local mode, hovered, pendingScroll = "groups", nil, nil
-local scrollPositions = { groups = 0, queue = 0 }
-local pools = { groups = {}, people = {}, headings = {}, empty = {} }
+local scrollPositions = { groups = 0, queue = 0, questing = 0 }
+local pools = { groups = {}, people = {}, headings = {}, empty = {}, questing = {} }
 local CONTENT_WIDTH = 728
 local C = {
     background = { 0.025, 0.025, 0.025 }, panel = { 0.035, 0.035, 0.035 },
@@ -426,10 +427,81 @@ local function renderPeople(players, y)
     return y + math.ceil(#players / 2) * 100
 end
 
+local function newQuestCard()
+    local card = panel(outputScroll.content, 0, 0, CONTENT_WIDTH, 78, C.card)
+    card.guildQueueKind, card.lines = "questMember", {}
+    card.name = label(card, "", 12, 10, 490, 22, "GameFontNormal", C.text)
+    card.level = label(card, "", 510, 10, 202, 22, nil, C.muted)
+    card.level:SetJustifyH("RIGHT")
+    card.summary = label(card, "", 12, 40, 532, 24, nil, C.muted)
+    card.expand = button(card, "Show quests", 552, 36, 160, 28, function()
+        if card.member then
+            local key = (ns.guildKey or "") .. ":" .. card.member.name
+            expandedQuests[key] = not expandedQuests[key]
+            ns.RefreshUI()
+        end
+    end, "questExpand")
+    bindHover(card, showTextTooltip)
+    return card
+end
+
+local function renderQuesting()
+    questZone:SetText("Questing in " .. ns.SafeText(ns.QuestingZoneText()))
+    shareQuests:SetChecked(ns.prefs.shareQuests)
+    local members, y = ns.GetQuestingPlayers(), 110
+    if #members == 0 then
+        return emptyCard("No guildmates found in your zone",
+            "Guild roster information can take a moment to arrive. Quest details require a guildmate using this version with sharing enabled.", y)
+    end
+    for _, member in ipairs(members) do
+        local card = acquire(pools.questing, newQuestCard)
+        card.member = member
+        card.name:SetText(ns.SafeText(member.name))
+        card.level:SetText(member.level > 0 and ("Level " .. member.level) or "Level unavailable")
+        local count = member.shared and #member.shared
+        card.summary:SetText(count and (count .. " shared active quest" .. (count == 1 and "" or "s"))
+            or "Quest data unavailable")
+        local key = (ns.guildKey or "") .. ":" .. member.name
+        local expanded = count and count > 0 and expandedQuests[key]
+        card.expand:SetShown(count ~= nil and count > 0)
+        card.expand:SetText(expanded and "Hide quests" or "Show quests")
+        card.tooltipTitle = ns.SafeText(member.name)
+        card.tooltipText = "Same zone does not guarantee the same layer or phase. "
+            .. (count and "Quest details reflect recently shared snapshots." or "Quest sharing is optional, or data has expired/is still loading.")
+        local used = expanded and count or 0
+        place(card, 0, y, CONTENT_WIDTH, 78 + used * 44)
+        for index = 1, used do
+            local line = card.lines[index]
+            if not line then
+                line = { title = label(card, "", 16, 0, 696, 20, "GameFontNormal", C.heading),
+                    status = label(card, "", 16, 0, 696, 18, nil, C.muted) }
+                card.lines[index] = line
+            end
+            local quest = member.shared[index]
+            place(line.title, 16, 76 + (index - 1) * 44, 696, 20)
+            place(line.status, 16, 96 + (index - 1) * 44, 696, 18)
+            line.title:SetText(ns.SafeText(quest.title))
+            line.status:SetText("You: " .. (quest.localComplete and "Ready to turn in" or "In progress")
+                .. "  |  Guildmate: " .. (quest.peerComplete and "Ready to turn in" or "In progress"))
+            line.title:Show()
+            line.status:Show()
+        end
+        for index = used + 1, #card.lines do
+            card.lines[index].title:Hide()
+            card.lines[index].status:Hide()
+        end
+        y = y + card:GetHeight() + 12
+    end
+    return y
+end
+
 local function renderOutput(players)
     for _, pool in pairs(pools) do pool.used = 0 end
+    questToolbar:SetShown(mode == "questing")
     local y = 0
-    if mode == "groups" then
+    if mode == "questing" then
+        y = renderQuesting()
+    elseif mode == "groups" then
         local ownIndex
         for index, group in ipairs(ns.groups) do
             if #group.slots == 5 and includesPlayer(group) then
@@ -514,9 +586,11 @@ function ns.RefreshUI()
     end
     selectionCount:SetText(selected .. " selected")
     groupsTab.selected, queueTab.selected = mode == "groups", mode == "queue"
+    questTab.selected = mode == "questing"
     queueTab:SetText("All queued (" .. #players .. ")")
     paint(groupsTab)
     paint(queueTab)
+    paint(questTab)
     renderOutput(players)
     if hovered and hovered:IsShown() and hovered.tooltip then hovered.tooltip(hovered) end
 end
@@ -626,8 +700,21 @@ local function createUI()
     queueTab = button(frame, "All queued", 510, 112, 166, 32,
         function() switchTab("queue") end, "tab")
     queueTab.mode = "queue"
+    questTab = button(frame, "Questing", 684, 112, 136, 32,
+        function() switchTab("questing") end, "tab")
+    questTab.mode = "questing"
     label(frame, "Live guild queue", 864, 119, 178, 18, nil, C.green):SetJustifyH("RIGHT")
     outputScroll = scrollArea(frame, 296, 156, 746, 530, "outputScroll")
+    questToolbar = CreateFrame("Frame", nil, outputScroll.content)
+    place(questToolbar, 0, 0, CONTENT_WIDTH, 104)
+    questZone = label(questToolbar, "", 2, 0, 724, 26, "GameFontNormal", C.heading)
+    shareQuests = check(questToolbar, "Share my zone and active quests with my guild", 0, 32, 724, 28,
+        function(self) ns.SetQuestSharing(self:GetChecked()) end, "questSharing")
+    shareQuests.tooltipTitle = "Optional quest sharing"
+    shareQuests.tooltipText = "Off by default. Share only zone ID, level, active quest IDs and completion states with your guild. No coordinates or quest history. Turning off withdraws your snapshot."
+    label(questToolbar, "Guild roster zones can include members without this addon. Shared quest data expires after 75 seconds; same zone does not guarantee the same layer or phase.",
+        2, 66, 724, 32, nil, C.muted, true)
+    questToolbar:Hide()
     solid(frame, 18, 695, 1024, 1, C.border)
     status = label(frame, "", 24, 699, 1012, 14, nil, C.muted)
     label(frame, "Invites are sent only when you click Create party. Leave the queue once your party is formed.",

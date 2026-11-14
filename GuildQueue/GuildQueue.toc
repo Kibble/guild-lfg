@@ -2,12 +2,13 @@
 ## Title: Guild Queue
 ## Notes: Guild-only dungeon queue and suggested groups. Party invitations only on click.
 ## Author: Guild Queue contributors
-## Version: 0.5.0
+## Version: 0.6.0
 ## SavedVariablesPerCharacter: GuildQueueDB
 
 Catalog.lua
 Protocol.lua
 State.lua
 Matcher.lua
+Questing.lua
 UI.lua
 Core.lua

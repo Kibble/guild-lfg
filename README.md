@@ -1,6 +1,6 @@
 # Guild Queue — WoW:Forever addon
 
-**Version 0.7.3 — fixed-size tab states; needs in-client visual confirmation.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
+**Version 0.7.4 — prominent same-zone guild heading; needs in-client visual confirmation.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
 
 ## Screenshot
 
@@ -37,7 +37,7 @@ Players explicitly leave the queue when no longer looking. Requesting invitation
 
 ## Install
 
-[Download GuildQueue-0.7.3.zip](GuildQueue-0.7.3.zip) and extract the `GuildQueue` folder.
+[Download GuildQueue-0.7.4.zip](GuildQueue-0.7.4.zip) and extract the `GuildQueue` folder.
 
 1. Close the game client.
 2. Extract the download and copy its **`GuildQueue` folder** into your Forever installation's `Interface/AddOns` directory. The resulting file must be `Interface/AddOns/GuildQueue/GuildQueue.toc`.
@@ -52,6 +52,8 @@ Additional commands: `/gq join` uses your current selections; `/gq leave` withdr
 Use Battle.net's **Show in Explorer** to find your installation; the launch client's folder is normally `_forever_`. Other files in this download are development files and do not need to be installed.
 
 **Updating from an earlier version:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
+
+**Quests heading in 0.7.4:** adds a larger gold **Guild members in your zone** heading above the list, with **Current zone: [zone name]** underneath. Quest-sharing controls and member cards are spaced below the heading. The zone subtitle updates when you move zones. This is a display-only change; sharing consent, the dungeon queue and fixed-size tab states are unchanged.
 
 **Fixed-size tab states in 0.7.3:** active, inactive and hover artwork now use the same native silhouette and bounds. Selection restores the gold coloring; inactive tabs and their hover artwork use a grayscale version of the same art. Both labels use the same vertical offset, so switching tabs changes color without growing/shrinking the tab or moving its text. Tab widths still fit their respective labels, and the 12-pixel inter-tab gap is retained. Queue, quest-sharing and invitation behavior are unchanged.
 
@@ -103,7 +105,7 @@ Automated Lua tests are included in `tests/run.lua`, covering protocol validatio
 
 Run from the project root with **Lua 5.1**: `lua5.1 tests/run.lua` and `lua5.1 tests/questing.lua`. Lua is a development tool only and is not required by players.
 
-**Current status:** all **119 automated tests passed** under **Lua 5.1.5** (84 core/UI tests and 35 quest protocol tests), including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Questing tests cover same-zone roster fallback, unavailable versus zero data, opt-in and withdrawal, strict guild filtering, log/zone changes, multipart limits/ordering/expiry, copy safety, cancellation of unsent fragments, scheduler rate limits, expansion, independent tab scrolling, native bottom-tab order and selection, Auction House tab anchors/padding/minimum width, non-overlapping native tab artwork in either selection state, identical artwork geometry and label placement across selection changes and hover styles, gold versus grayscale coloring, full-width Quests layout, and restoring the last dungeon view. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
+**Current status:** all **120 automated tests passed** under **Lua 5.1.5** (85 core/UI tests and 35 quest protocol tests), including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Questing tests cover the prominent same-zone guild heading, live zone subtitle updates, non-overlapping header/controls/member-card layout, same-zone roster fallback, unavailable versus zero data, opt-in and withdrawal, strict guild filtering, log/zone changes, multipart limits/ordering/expiry, copy safety, cancellation of unsent fragments, scheduler rate limits, expansion, independent tab scrolling, native bottom-tab order and selection, Auction House tab anchors/padding/minimum width, non-overlapping native tab artwork in either selection state, identical artwork geometry and label placement across selection changes and hover styles, gold versus grayscale coloring, full-width Quests layout, and restoring the last dungeon view. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
 
 Before wider use, test with at least five addon-equipped guild characters:
 

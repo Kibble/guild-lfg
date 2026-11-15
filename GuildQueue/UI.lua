@@ -7,7 +7,7 @@ local roleChecks, dungeonChecks, counters = {}, {}, {}
 local mode, dungeonMode, hovered, pendingScroll = "groups", "groups", nil, nil
 local scrollPositions = { groups = 0, queue = 0, questing = 0 }
 local pools = { groups = {}, people = {}, headings = {}, empty = {}, questing = {} }
-local CONTENT_WIDTH, QUEST_WIDTH = 728, 1006
+local CONTENT_WIDTH, QUEST_WIDTH, QUEST_TOOLBAR_HEIGHT = 728, 1006, 136
 local C = {
     background = { 0.025, 0.025, 0.025 }, panel = { 0.035, 0.035, 0.035 },
     card = { 0.045, 0.045, 0.045 }, tile = { 0.025, 0.025, 0.025 },
@@ -494,9 +494,9 @@ local function newQuestCard()
 end
 
 local function renderQuesting()
-    questZone:SetText("Questing in " .. ns.SafeText(ns.QuestingZoneText()))
+    questZone:SetText("Current zone: " .. ns.SafeText(ns.QuestingZoneText()))
     shareQuests:SetChecked(ns.prefs.shareQuests)
-    local members, y = ns.GetQuestingPlayers(), 110
+    local members, y = ns.GetQuestingPlayers(), QUEST_TOOLBAR_HEIGHT + 6
     if #members == 0 then
         return emptyCard("No guildmates found in your zone",
             "Guild roster information can take a moment to arrive. Quest details require a guildmate using this version with sharing enabled.", y, QUEST_WIDTH)
@@ -770,14 +770,15 @@ local function createUI()
     queueViewStatus:SetJustifyH("RIGHT")
     outputScroll = scrollArea(frame, 296, 156, 746, 530, "outputScroll")
     questToolbar = CreateFrame("Frame", nil, outputScroll.content)
-    place(questToolbar, 0, 0, QUEST_WIDTH, 104)
-    questZone = label(questToolbar, "", 2, 0, QUEST_WIDTH - 4, 26, "GameFontNormal", C.heading)
-    shareQuests = check(questToolbar, "Share my zone and active quests with my guild", 0, 32, QUEST_WIDTH - 4, 28,
+    place(questToolbar, 0, 0, QUEST_WIDTH, QUEST_TOOLBAR_HEIGHT)
+    label(questToolbar, "Guild members in your zone", 2, 0, QUEST_WIDTH - 4, 30, "GameFontNormalLarge", C.heading)
+    questZone = label(questToolbar, "", 2, 32, QUEST_WIDTH - 4, 22, "GameFontNormal", C.text)
+    shareQuests = check(questToolbar, "Share my zone and active quests with my guild", 0, 64, QUEST_WIDTH - 4, 28,
         function(self) ns.SetQuestSharing(self:GetChecked()) end, "questSharing")
     shareQuests.tooltipTitle = "Optional quest sharing"
     shareQuests.tooltipText = "Off by default. Share only zone ID, level, active quest IDs and completion states with your guild. No coordinates or quest history. Turning off withdraws your snapshot."
     label(questToolbar, "Guild roster zones can include members without this addon. Shared quest data expires after 75 seconds; same zone does not guarantee the same layer or phase.",
-        2, 66, QUEST_WIDTH - 4, 32, nil, C.muted, true)
+        2, 98, QUEST_WIDTH - 4, 32, nil, C.muted, true)
     questToolbar:Hide()
     solid(frame, 18, 695, 1024, 1, C.border)
     status = label(frame, "", 24, 699, 1012, 14, nil, C.muted)

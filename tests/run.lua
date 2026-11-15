@@ -1118,6 +1118,47 @@ test("UI header displays and refreshes the recent online-addon member count", fu
     c:advance(c.ns.TIMEOUT)
     equal(onlineCounter.text, "1")
 end)
+test("Quests prominently labels same-zone guildmates without overlapping controls or cards", function()
+    local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    local widgets, tabs, heading, zone, consent, hint = openUI(c), {}
+    for _, control in ipairs(widgets) do
+        if control.mainTab then tabs[control.mode] = control end
+        if control.text == "Guild members in your zone" then heading = control end
+        if control.guildQueueKind == "questSharing" then consent = control end
+    end
+    assert(heading and consent)
+    equal(heading.template, "GameFontNormalLarge")
+    tabs.questing.scripts.OnClick(tabs.questing)
+    for _, control in ipairs(widgets) do
+        if control.text == "Current zone: Elwynn Forest" then zone = control end
+        if control.parent == heading.parent and control.text
+            and control.text:find("Guild roster zones", 1, true) == 1 then hint = control end
+    end
+    assert(zone and hint and heading.parent.shown)
+    local function bottom(control) return -control.point[3] + control:GetHeight() end
+    assert(bottom(heading) <= -zone.point[3])
+    assert(bottom(zone) <= -consent.point[3])
+    assert(bottom(consent) <= -hint.point[3])
+    assert(bottom(hint) <= heading.parent:GetHeight())
+    local foundCard = false
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "questMember" and control.shown then
+            foundCard = true
+            assert(-control.point[3] > heading.parent:GetHeight())
+        end
+    end
+    assert(foundCard)
+    c.zoneID, c.zoneName = 52, "Westfall"
+    c:fire("ZONE_CHANGED_NEW_AREA")
+    c:advance(1)
+    c.ns.RefreshUI()
+    equal(zone.text, "Current zone: Westfall")
+    equal(heading.text, "Guild members in your zone")
+    tabs.dungeons.scripts.OnClick(tabs.dungeons)
+    assert(not heading.parent.shown)
+    assert(not c.ns.prefs.shareQuests and not c.ns.queued)
+    equal(#c.invites, 0)
+end)
 test("Questing tab shows unknown versus zero shared quests and expands completion details", function()
     local c = client({ quests = { { questID = 10, title = "A shared quest" } },
         rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })

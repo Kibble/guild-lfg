@@ -154,7 +154,7 @@ local function paint(control)
     elseif control.guildQueueKind == "tab" then
         if control.mainTab then
             if control.selected then PanelTemplates_SelectTab(control) else PanelTemplates_DeselectTab(control) end
-            return -- Native bottom tabs own their active/inactive fonts and artwork.
+            return -- Native visibility/color changes; both states share fixed geometry.
         end
         control:SetButtonState(control.selected and "PUSHED" or "NORMAL", control.selected == true)
     end
@@ -205,6 +205,21 @@ local function bottomTab(parent, text, previous, callback, tabMode)
     control.guildQueueKind, control.mainTab, control.mode = "tab", true, tabMode
     control:SetText(text)
     control.caption = control.Text
+    -- Use one silhouette for every state, not the taller native selected shape.
+    -- Only desaturation and the native font color change when a tab is selected.
+    control.selectedTextY, control.deselectedTextY = -3, -3
+    for part, atlas in pairs({ Left = "uiframe-activetab-left", Middle = "_uiframe-activetab-center",
+        Right = "uiframe-activetab-right" }) do
+        local active = control[part .. "Active"]
+        active:SetDesaturated(false)
+        for _, suffix in ipairs({ "", "Highlight" }) do
+            local texture = control[part .. suffix]
+            texture:SetAtlas(atlas, true)
+            texture:ClearAllPoints()
+            texture:SetAllPoints(active)
+            texture:SetDesaturated(true)
+        end
+    end
     PanelTemplates_TabResize(control, 20, nil, 70)
     if previous then
         -- The art extends 8 pixels right and up to 3 left beyond each button.

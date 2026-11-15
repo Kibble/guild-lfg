@@ -970,8 +970,9 @@ local function openUI(c)
         self.height = height
     end
     function methods:SetAllPoints(target) self.allPoints = target end
-    function methods:GetWidth() return self.width end
-    function methods:GetHeight() return self.height end
+    function methods:GetWidth() return self.allPoints and self.allPoints:GetWidth() or self.width end
+    function methods:GetHeight() return self.allPoints and self.allPoints:GetHeight() or self.height end
+    function methods:ClearAllPoints() self.point, self.allPoints = nil, nil end
     function methods:SetText(text)
         self.text = tostring(text or "")
         if self.fontString then self.fontString.text = self.text end
@@ -985,7 +986,14 @@ local function openUI(c)
     function methods:SetColorTexture(...) self.color = { ... } end
     function methods:SetTextColor(...) self.textColor = { ... } end
     function methods:SetTexture(path) self.texture = path end
-    function methods:SetAtlas(atlas) self.atlas = atlas end
+    function methods:SetAtlas(atlas, useAtlasSize)
+        self.atlas = atlas
+        if useAtlasSize then
+            -- Deliberately model distinct native active/inactive atlas heights.
+            self:SetSize(16, atlas:find("activetab", 1, true) and 32 or 26)
+        end
+    end
+    function methods:SetDesaturated(value) self.desaturated = value end
     function methods:SetDrawLayer(layer, sublevel) self.layer, self.sublevel = layer, sublevel end
     function methods:SetButtonState(state, locked) self.buttonState, self.locked = state, locked end
     function methods:GetNormalTexture() return self.normalTexture end
@@ -1020,7 +1028,7 @@ local function openUI(c)
     function methods:GetStringHeight() return #(self.text or "") / 5 + 16 end
     function methods:SetVerticalScroll(value) self.scroll = value end
     function methods:GetVerticalScroll() return self.scroll end
-    for _, name in ipairs({ "ClearAllPoints", "SetJustifyH", "SetJustifyV", "SetSpacing",
+    for _, name in ipairs({ "SetJustifyH", "SetJustifyV", "SetSpacing",
         "SetFrameStrata", "SetClampedToScreen", "SetMovable", "EnableMouse", "EnableMouseWheel",
         "SetWordWrap", "SetNonSpaceWrap", "RegisterForDrag", "SetScrollChild", "StartMoving",
         "StopMovingOrSizing" }) do
@@ -1050,8 +1058,14 @@ local function openUI(c)
             control.Text = control:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             control.Text:SetHeight(10)
             control:SetFontString(control.Text)
-            for _, key in ipairs({ "Left", "Middle", "Right", "LeftActive", "MiddleActive", "RightActive" }) do
-                control[key] = control:CreateTexture(nil, "BACKGROUND")
+            for _, part in ipairs({ "Left", "Middle", "Right" }) do
+                local suffix = part == "Middle" and "center" or part:lower()
+                local prefix = part == "Middle" and "_" or ""
+                for _, state in ipairs({ "", "Active", "Highlight" }) do
+                    local texture = control:CreateTexture(nil, state == "Highlight" and "HIGHLIGHT" or "BACKGROUND")
+                    texture:SetAtlas(prefix .. "uiframe-" .. (state == "Active" and "activetab-" or "tab-") .. suffix, true)
+                    control[part .. state] = texture
+                end
             end
             -- Actual outer anchors from Forever's PanelTabButtonTemplate:
             -- artwork extends beyond the button's clickable rectangle.
@@ -1065,7 +1079,8 @@ local function openUI(c)
     local function nativeTabState(control, selected)
         control.nativeSelected = selected
         control:SetEnabled(not selected)
-        control.Text:SetPoint("CENTER", control, "CENTER", 0, selected and -3 or 2)
+        local textY = selected and (control.selectedTextY or -3) or (control.deselectedTextY or 2)
+        control.Text:SetPoint("CENTER", control, "CENTER", 0, textY)
         for _, key in ipairs({ "Left", "Middle", "Right" }) do
             control[key]:SetShown(not selected)
             control[key .. "Active"]:SetShown(selected)
@@ -1583,9 +1598,54 @@ test("bottom tab artwork never overlaps its neighbor in either selection state",
         local right = first.nativeSelected and first.RightActive or first.Right
         local left = second.nativeSelected and second.LeftActive or second.Left
         assert(right.shown and left.shown)
-        local firstRight = first:GetWidth() + right.point[4]
-        local secondLeft = first:GetWidth() + second.point[4] + left.point[4]
+        local firstRight = first:GetWidth() + (right.allPoints or right).point[4]
+        local secondLeft = first:GetWidth() + second.point[4] + (left.allPoints or left).point[4]
         assert(secondLeft >= firstRight + 1, "Visible native tab artwork must have a gap, not overlap")
+    end
+    equal(#c.invites, 0)
+end)
+test("bottom tabs change color without changing artwork bounds or label position", function()
+    local c = client()
+    local tabs, original = {}, {}
+    local function geometry(texture)
+        local bounds = texture.allPoints or texture
+        return { atlas = texture.atlas, width = texture:GetWidth(), height = texture:GetHeight(), point = bounds.point }
+    end
+    for _, control in ipairs(openUI(c)) do
+        if control.mainTab then
+            tabs[control.mode] = control
+            original[control] = { width = control:GetWidth(), height = control:GetHeight(),
+                anchor = control.point, textY = control.Text.point[5], parts = {} }
+            for _, part in ipairs({ "Left", "Middle", "Right" }) do
+                local shown = control[part .. (control.nativeSelected and "Active" or "")]
+                original[control].parts[part] = geometry(shown)
+            end
+        end
+    end
+    for _, selected in ipairs({ "questing", "dungeons", "questing" }) do
+        tabs[selected].scripts.OnClick(tabs[selected])
+        c.ns.RefreshUI()
+        for _, control in pairs(tabs) do
+            local before = original[control]
+            equal(control:GetWidth(), before.width)
+            equal(control:GetHeight(), before.height)
+            equal(control.point, before.anchor)
+            equal(control.Text.point[5], before.textY)
+            for _, part in ipairs({ "Left", "Middle", "Right" }) do
+                local active = control[part .. "Active"]
+                for _, state in ipairs({ "", "Active", "Highlight" }) do
+                    local texture = control[part .. state]
+                    local bounds, expected = geometry(texture), before.parts[part]
+                    equal(bounds.atlas, expected.atlas)
+                    equal(bounds.width, expected.width)
+                    equal(bounds.height, expected.height)
+                    equal(bounds.point, expected.point)
+                    equal(texture.desaturated, state ~= "Active")
+                end
+                equal(control[part].shown, not control.nativeSelected)
+                equal(active.shown, control.nativeSelected)
+            end
+        end
     end
     equal(#c.invites, 0)
 end)

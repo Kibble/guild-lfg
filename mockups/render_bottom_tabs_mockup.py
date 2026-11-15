@@ -24,9 +24,9 @@ svg = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/
        f'<title>Guild Queue — bottom tabs, {page.title()} page</title>',
        '<desc>Two bottom navigation tabs, Dungeons followed by Quests. Dungeons contains the queue and its filters; Quests uses the whole page for same-zone guildmates and shared quests. Illustrative data, not an in-game capture.</desc>',
        f'<defs><image id="screen" width="1612" height="1135" xlink:href="data:image/png;base64,{payload}"/>',
-       '<linearGradient id="tab" x2="0" y2="1"><stop stop-color="#252521"/><stop offset="1" stop-color="#11110f"/></linearGradient>',
-       '<linearGradient id="activeTab" x2="0" y2="1"><stop stop-color="#494333"/><stop offset="1" stop-color="#25231c"/></linearGradient>',
-       '<clipPath id="window"><rect x="12" y="12" width="1592" height="1174"/></clipPath></defs>']
+       f'<image id="auctionTabs" width="22" height="87" xlink:href="data:image/png;base64,{base64.b64encode((OUT / "assets/auction-house-tabs.png").read_bytes()).decode("ascii")}"/>',
+       '<clipPath id="window"><rect x="12" y="12" width="1592" height="1114"/></clipPath>',
+       '<clipPath id="belowFrame"><rect x="12" y="1124" width="1592" height="70"/></clipPath></defs>']
 
 
 def box(x, y, w, h, fill, border='none', radius=0, stroke=1):
@@ -37,8 +37,8 @@ def text(x, y, value, size=19, color=WHITE, anchor='start', bold=False):
     svg.append(f'<text x="{x}" y="{y}" fill="{color}" font-family="DejaVu Serif" font-size="{size}" font-weight="{"bold" if bold else "normal"}" text-anchor="{anchor}">{escape(value)}</text>')
 
 
-def crop(x, y, w, h, sx, sy, sw, sh):
-    svg.append(f'<svg x="{x}" y="{y}" width="{w}" height="{h}" viewBox="{sx} {sy} {sw} {sh}" preserveAspectRatio="none" overflow="hidden"><use xlink:href="#screen"/></svg>')
+def crop(x, y, w, h, sx, sy, sw, sh, image='screen'):
+    svg.append(f'<svg x="{x}" y="{y}" width="{w}" height="{h}" viewBox="{sx} {sy} {sw} {sh}" preserveAspectRatio="none" overflow="hidden"><use xlink:href="#{image}"/></svg>')
 
 
 def button(x, y, w, h, title, active=False):
@@ -68,22 +68,20 @@ def member(y, name, level, summary, quests=None):
     return y + height + 18
 
 
-def bottom_tab(x, title, selected):
-    y, width, height = 1127, 192, 48
-    fill = 'activeTab' if selected else 'tab'
-    svg.append(f'<path d="M{x+7} {y+2} H{x+width-7} L{x+width} {y+9} V{y+height-7} L{x+width-7} {y+height} H{x+7} L{x} {y+height-7} V{y+9} Z" fill="url(#{fill})" stroke="#888778" stroke-width="1.5"/>')
-    text(x + width / 2, y + 30, title, 20, WHITE if selected else GOLD, 'middle')
+def bottom_tab(x, title, selected, width):
+    # Use only blank native tab-art strips from the supplied AH screenshot;
+    # the original labels, chat, money and character information are not bundled.
+    y, source_y, height = 1118, 0 if selected else 49, 49 if selected else 38
+    crop(x, y, 10, height, 0, source_y, 10, height, 'auctionTabs')
+    crop(x + 10, y, width - 21, height, 10, source_y, 1, height, 'auctionTabs')
+    crop(x + width - 11, y, 11, height, 11, source_y, 11, height, 'auctionTabs')
+    text(x + width / 2, y + (31 if selected else 24), title, 18, WHITE if selected else GOLD, 'middle')
 
 
 # Preserve the actual native game border, sidebar, role icons and stock controls.
 box(0, 0, W, H, '#141414')
 svg.append('<g transform="translate(20 20)"><g clip-path="url(#window)"><use xlink:href="#screen"/>')
-# Add the 40 UI-pixel footer used by v0.7.0 without stretching the original content.
-box(12, 1107, 1592, 79, '#050503')
-crop(12, 1107, 31, 79, 12, 1000, 31, 1)
-crop(1568, 1107, 36, 79, 1568, 1000, 36, 1)
-crop(12, 1167, 1592, 19, 12, 1107, 1592, 19)
-box(41, 1116, 1536, 1, '#77776f')
+# Keep the original frame height; Auction House tabs hang underneath it.
 
 # Update the screenshot's old three-counter header to the current four-counter one.
 box(700, 51, 607, 96, '#050504')
@@ -111,13 +109,14 @@ if page == 'quests':
     next_y = member(next_y, 'Torren-CAMWOWEU5Realm4PvP', 23, 'Quest data unavailable')
     assert next_y < 1049, 'Cards overflow the visible viewport'
 
-bottom_tab(56, 'Dungeons', page == 'dungeons')
-bottom_tab(266, 'Quests', page == 'quests')
+svg.append('</g><g clip-path="url(#belowFrame)">')
+bottom_tab(44, 'Dungeons', page == 'dungeons', 146)
+bottom_tab(198, 'Quests', page == 'quests', 124)
 svg.append('</g></g>')
 
 # These are design previews, not actual in-game verification.
-text(44, 1241, f'BOTTOM TABS MOCKUP / {page.upper()} / v0.7.0', 19, GOLD)
-text(44, 1270, 'Illustrative data. Native bottom-tab artwork and fonts are approximated; not an in-game capture.', 16, '#b8b8b8')
+text(44, 1241, f'AUCTION HOUSE STYLE TABS / {page.upper()} / v0.7.1', 19, GOLD)
+text(44, 1270, 'Tab art from your reference. Illustrative data and font/layout approximations; not an in-game capture.', 16, '#b8b8b8')
 svg.append('</svg>')
 svg_path, png_path = OUT / f'{STEM}.svg', OUT / f'{STEM}.png'
 svg_path.write_text('\n'.join(svg), encoding='utf-8')

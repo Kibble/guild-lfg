@@ -1046,7 +1046,9 @@ local function openUI(c)
                 control[key] = control:CreateTexture(nil, "ARTWORK")
             end
         elseif template == "PanelTabButtonTemplate" then
+            control:SetSize(10, 32)
             control.Text = control:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            control.Text:SetHeight(10)
             control:SetFontString(control.Text)
             for _, key in ipairs({ "Left", "Middle", "Right", "LeftActive", "MiddleActive", "RightActive" }) do
                 control[key] = control:CreateTexture(nil, "BACKGROUND")
@@ -1065,6 +1067,12 @@ local function openUI(c)
     end
     c.env.PanelTemplates_SelectTab = function(control) nativeTabState(control, true) end
     c.env.PanelTemplates_DeselectTab = function(control) nativeTabState(control, false) end
+    c.env.PanelTemplates_TabResize = function(control, padding, absolute, minimum)
+        control.tabPadding, control.minTabWidth = padding, minimum
+        local width = absolute or math.max(minimum, #control.text * 7 + 20 + padding)
+        control:SetWidth(width)
+        control.Text:SetWidth(width - 20 - padding)
+    end
     local ui = assert(loadfile("GuildQueue/UI.lua"))
     setfenv(ui, c.env)
     ui("GuildQueue", c.ns)
@@ -1295,7 +1303,7 @@ test("UI uses native WoW borders, buttons, checkboxes and close-button artwork",
     equal(close.text, "") -- Native X texture, not a second text-based X.
     equal(main.backdrop.edgeFile, "Interface\\DialogFrame\\UI-DialogBox-Border")
     equal(main:GetWidth(), 1060)
-    equal(main:GetHeight(), 780)
+    equal(main:GetHeight(), 740)
 end)
 test("own suggested group renders five assigned member tiles and a click-only action", function()
     local c = client()
@@ -1509,7 +1517,7 @@ test("role icons stay inside their visible selectors and listing tiles", functio
     end
     assert(count >= 13) -- Three selectors, five assigned icons, five preference icons.
 end)
-test("exactly two native bottom tabs are Dungeons then Quests and swap entire pages", function()
+test("Auction House-style bottom tabs are Dungeons then Quests and swap entire pages", function()
     local c = client()
     c.ns.SetQueued(true)
     c:advance(1)
@@ -1523,11 +1531,23 @@ test("exactly two native bottom tabs are Dungeons then Quests and swap entire pa
     equal(#mainTabs, 2)
     equal(mainTabs[1].text, "Dungeons")
     equal(mainTabs[2].text, "Quests")
-    assert(mainTabs[1].point[2] < mainTabs[2].point[2])
+    local first, second = mainTabs[1], mainTabs[2]
+    equal(first.point[1], "BOTTOMLEFT")
+    equal(first.point[2], first.parent)
+    equal(first.point[3], "BOTTOMLEFT")
+    equal(first.point[4], 20)
+    equal(first.point[5], -28)
+    equal(second.point[1], "LEFT")
+    equal(second.point[2], first)
+    equal(second.point[3], "RIGHT")
+    equal(second.point[4], -15)
+    equal(second.point[5], 0)
+    assert(first:GetWidth() > second:GetWidth(), "Auction House tabs size to their text")
     for _, tab in ipairs(mainTabs) do
         equal(tab.template, "PanelTabButtonTemplate")
-        assert(-tab.point[3] > tab.parent:GetHeight() * 0.9)
-        assert(-tab.point[3] + tab:GetHeight() <= tab.parent:GetHeight())
+        equal(tab.tabPadding, 20)
+        equal(tab.minTabWidth, 70)
+        equal(tab:GetHeight(), 32)
     end
     assert(tabs.dungeons.nativeSelected and not tabs.questing.nativeSelected)
     tabs.questing.scripts.OnClick(tabs.questing)

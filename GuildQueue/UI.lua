@@ -199,14 +199,19 @@ local function button(parent, text, x, y, width, height, callback, kind)
     return control
 end
 
-local function bottomTab(parent, text, x, callback, tabMode)
+local function bottomTab(parent, text, previous, callback, tabMode)
+    -- Same base, sizing and anchors as AuctionHouseFrame's display-mode tabs,
+    -- without loading the Auction House addon or its behavior-specific mixins.
     local control = CreateFrame("Button", nil, parent, "PanelTabButtonTemplate")
-    place(control, x, 742, 128, 32)
     control.guildQueueKind, control.mainTab, control.mode = "tab", true, tabMode
     control:SetText(text)
     control.caption = control.Text
-    control.Text:SetWidth(104)
-    control.Text:SetHeight(18)
+    PanelTemplates_TabResize(control, 20, nil, 70)
+    if previous then
+        control:SetPoint("LEFT", previous, "RIGHT", -15, 0)
+    else
+        control:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 20, -28)
+    end
     control:SetScript("OnClick", callback)
     return control
 end
@@ -652,8 +657,8 @@ end
 
 local function createUI()
     frame = CreateFrame("Frame", "GuildQueueFrame", UIParent, "BackdropTemplate")
-    frame:SetSize(1060, 780)
-    frame.minTabWidth, frame.maxTabWidth = 128, 128
+    frame:SetSize(1060, 740)
+    frame.tabPadding, frame.minTabWidth = 20, 70
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
     frame:SetClampedToScreen(true)
@@ -743,8 +748,8 @@ local function createUI()
     queueTab = button(frame, "All queued", 510, 112, 166, 32,
         function() switchTab("queue") end, "tab")
     queueTab.mode = "queue"
-    dungeonTab = bottomTab(frame, "Dungeons", 28, function() switchTab("dungeons") end, "dungeons")
-    questTab = bottomTab(frame, "Quests", 168, function() switchTab("questing") end, "questing")
+    dungeonTab = bottomTab(frame, "Dungeons", nil, function() switchTab("dungeons") end, "dungeons")
+    questTab = bottomTab(frame, "Quests", dungeonTab, function() switchTab("questing") end, "questing")
     queueViewStatus = label(frame, "Live guild queue", 864, 119, 178, 18, nil, C.green)
     queueViewStatus:SetJustifyH("RIGHT")
     outputScroll = scrollArea(frame, 296, 156, 746, 530, "outputScroll")
@@ -762,7 +767,6 @@ local function createUI()
     status = label(frame, "", 24, 699, 1012, 14, nil, C.muted)
     label(frame, "Invites are sent only when you click Create party. Leave the queue once your party is formed.",
         24, 715, 1012, 14, nil, C.heading)
-    solid(frame, 18, 735, 1024, 1, C.border)
     frame:SetScript("OnShow", function()
         fitScreen()
         ns.RefreshUI()

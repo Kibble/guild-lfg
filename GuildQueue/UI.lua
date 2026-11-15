@@ -138,6 +138,14 @@ local function showPartyTooltip(control)
     GameTooltip:Show()
 end
 
+local function showQuestInviteTooltip(control)
+    GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Invite")
+    GameTooltip:AddLine(ns.QuestInviteDisabledReason(control.memberName)
+        or "Invite this guild member to your party. They must accept.", 1, 1, 1, true)
+    GameTooltip:Show()
+end
+
 local function showQueueTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
     GameTooltip:SetText(ns.queued and "Leave queue" or "Join queue")
@@ -478,9 +486,14 @@ end
 local function newQuestCard()
     local card = panel(outputScroll.content, 0, 0, QUEST_WIDTH, 78, C.card)
     card.guildQueueKind, card.lines = "questMember", {}
-    card.name = label(card, "", 12, 10, QUEST_WIDTH - 238, 22, "GameFontNormal", C.text)
-    card.level = label(card, "", QUEST_WIDTH - 218, 10, 202, 22, nil, C.muted)
+    card.name = label(card, "", 12, 10, QUEST_WIDTH - 322, 22, "GameFontNormal", C.text)
+    card.level = label(card, "", QUEST_WIDTH - 302, 10, 178, 22, nil, C.muted)
     card.level:SetJustifyH("RIGHT")
+    card.invite = button(card, "Invite", QUEST_WIDTH - 116, 6, 100, 26, function(self)
+        ns.InviteQuestingPlayer(self.memberName)
+    end, "questInvite")
+    card.invite:SetMotionScriptsWhileDisabled(true)
+    card.invite.tooltip = showQuestInviteTooltip
     card.summary = label(card, "", 12, 40, QUEST_WIDTH - 196, 24, nil, C.muted)
     card.expand = button(card, "Show quests", QUEST_WIDTH - 176, 36, 160, 28, function()
         if card.member then
@@ -504,6 +517,9 @@ local function renderQuesting()
     for _, member in ipairs(members) do
         local card = acquire(pools.questing, newQuestCard)
         card.member = member
+        card.invite.memberName = member.name
+        card.invite:SetEnabled(ns.QuestInviteDisabledReason(member.name) == nil)
+        paint(card.invite)
         card.name:SetText(ns.SafeText(member.name))
         card.level:SetText(member.level > 0 and ("Level " .. member.level) or "Level unavailable")
         local count = member.shared and #member.shared
@@ -773,16 +789,16 @@ local function createUI()
     place(questToolbar, 0, 0, QUEST_WIDTH, QUEST_TOOLBAR_HEIGHT)
     label(questToolbar, "Guild members in your zone", 2, 0, QUEST_WIDTH - 4, 30, "GameFontNormalLarge", C.heading)
     questZone = label(questToolbar, "", 2, 32, QUEST_WIDTH - 4, 22, "GameFontNormal", C.text)
-    shareQuests = check(questToolbar, "Share my zone and active quests with my guild", 0, 64, QUEST_WIDTH - 4, 28,
+    shareQuests = check(questToolbar, "Share my active quests with my guild", 0, 64, QUEST_WIDTH - 4, 28,
         function(self) ns.SetQuestSharing(self:GetChecked()) end, "questSharing")
     shareQuests.tooltipTitle = "Optional quest sharing"
-    shareQuests.tooltipText = "Off by default. Share only zone ID, level, active quest IDs and completion states with your guild. No coordinates or quest history. Turning off withdraws your snapshot."
+    shareQuests.tooltipText = "Off by default. Share active quest IDs and completion states with your guild; snapshots include zone ID and level as context. Guild-roster zones remain available without quest sharing. No coordinates or quest history. Turning off withdraws your snapshot."
     label(questToolbar, "Guild roster zones can include members without this addon. Shared quest data expires after 75 seconds; same zone does not guarantee the same layer or phase.",
         2, 98, QUEST_WIDTH - 4, 32, nil, C.muted, true)
     questToolbar:Hide()
     solid(frame, 18, 695, 1024, 1, C.border)
     status = label(frame, "", 24, 699, 1012, 14, nil, C.muted)
-    label(frame, "Invites are sent only when you click Create party. Leave the queue once your party is formed.",
+    label(frame, "Invites are sent only when you click Create party or Invite. Leave the dungeon queue once your party is formed.",
         24, 715, 1012, 14, nil, C.heading)
     frame:SetScript("OnShow", function()
         fitScreen()

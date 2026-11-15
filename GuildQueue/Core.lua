@@ -7,6 +7,7 @@ local presence = {}
 local registered, started = false, false
 local transportError
 local lastPartyInviteAt = -100
+local lastQuestInviteAt = {}
 ns.queued = false
 ns.state = ns.State.New()
 ns.groups, ns.individuals = {}, {}
@@ -362,7 +363,7 @@ local function applyGuildIdentity(guildName, guildRealm)
         ns.state = ns.State.New()
         pendingStateAt, pendingHello, pendingPresence = nil, key ~= nil, key ~= nil
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
-        presence, guildMembers = {}, {}
+        presence, guildMembers, lastQuestInviteAt = {}, {}, {}
         ns.questing = ns.Questing.New()
         questBatch, questBatchSignature, questSentSignature = nil, nil, nil
         questStopPending, localDirty = false, true
@@ -397,6 +398,56 @@ local function updateGuild(clearIfUnresolved)
     end
     guildIdentityReady = true
     applyGuildIdentity(guildName, guildRealm)
+end
+
+-- Read-only eligibility for the same-zone card button and its hover tooltip.
+function ns.QuestInviteDisabledReason(name)
+    if not ns.IsReady() then return "Your guild information is not ready yet." end
+    local target = normalize(name)
+    if not target or target:lower() == ns.playerName:lower() then
+        return "Select another guild member to invite."
+    end
+    local member = guildMembers[target:lower()]
+    if not member or localZoneName == "" or member.area ~= localZoneName then
+        return "The guild roster cannot confirm this member is online in your zone. Try refreshing the Guild window."
+    end
+    if InCombatLockdown() then return "You cannot send invitations during combat." end
+    if not C_PartyInfo or type(C_PartyInfo.InviteUnit) ~= "function"
+        or type(C_PartyInfo.CanInvite) ~= "function" or type(C_PartyInfo.IsPartyFull) ~= "function" then
+        return "Party invitations are unavailable on this client."
+    end
+    local instanceGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE)
+    local full = safeCall(C_PartyInfo.IsPartyFull, LE_PARTY_CATEGORY_HOME)
+    local allowed = safeCall(C_PartyInfo.CanInvite)
+    if type(instanceGroup) ~= "boolean" or type(full) ~= "boolean" or type(allowed) ~= "boolean" then
+        return "Your party status is unavailable right now."
+    end
+    if instanceGroup then return "You cannot send these invitations from an instance group." end
+    if full then return "Your party or raid is full." end
+    if not allowed then return "You do not have permission to invite players to this group." end
+    if GetTime() - (lastQuestInviteAt[target:lower()] or -100) < 5 then
+        return "An invitation was just requested for this member. Wait a few seconds before trying again."
+    end
+    return nil, member.name
+end
+
+-- Only the explicit Invite click calls this. Never retry from timers or messages.
+function ns.InviteQuestingPlayer(name)
+    updateGuild()
+    if localDirty then scanLocalQuests() end
+    scanGuildMembers()
+    local reason, target = ns.QuestInviteDisabledReason(name)
+    if reason then
+        printMessage(reason)
+        ns.RefreshUI()
+        return false
+    end
+    lastQuestInviteAt[target:lower()] = GetTime()
+    local requested = pcall(C_PartyInfo.InviteUnit, target)
+    printMessage(requested and "Party invitation requested. The player must accept."
+        or "The invitation request could not be submitted. Check WoW's messages before trying again.")
+    ns.RefreshUI()
+    return requested
 end
 
 local function send(message)

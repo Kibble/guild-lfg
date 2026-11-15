@@ -294,11 +294,15 @@ local function client(options)
         return c.homeGroup
     end
     env.InCombatLockdown = function() return c.combat end
-    env.C_PartyInfo = { InviteUnit = function(name)
-        if c.failInvite == name then error("Simulated invitation failure") end
-        c.invites[#c.invites + 1] = name
-        if c.inviteCreatesParty then c.homeGroup = true end
-    end }
+    env.C_PartyInfo = {
+        CanInvite = function() return c.canInvite ~= false end,
+        IsPartyFull = function() return c.partyFull == true end,
+        InviteUnit = function(name)
+            if c.failInvite == name then error("Simulated invitation failure") end
+            c.invites[#c.invites + 1] = name
+            if c.inviteCreatesParty then c.homeGroup = true end
+        end,
+    }
     env.GetGuildInfo = function()
         if c.guildInfoUnavailable then return nil end
         return c.guild
@@ -548,6 +552,66 @@ test("party and combat events refresh the UI without sending invitations", funct
     equal(#c.invites, 0)
 end)
 
+test("same-zone invites work without addon peers or shared quests and never retry automatically", function()
+    local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    assert(not c.ns.prefs.shareQuests and next(c.ns.questing.peers) == nil)
+    assert(c.ns.QuestInviteDisabledReason("Friend-TestRealm") == nil)
+    c.inviteCreatesParty = true
+    assert(c.ns.InviteQuestingPlayer("Friend Test Realm"))
+    equal(#c.invites, 1)
+    equal(c.invites[1], "Friend-TestRealm")
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c:advance(6)
+    equal(#c.invites, 1)
+    assert(c.ns.QuestInviteDisabledReason("Friend-TestRealm") == nil)
+    assert(c.ns.InviteQuestingPlayer("Friend-TestRealm")) -- Existing group with invite permission.
+    equal(#c.invites, 2)
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+end)
+test("same-zone invites recheck roster online status and both players' zones at click time", function()
+    for _, change in ipairs({ "offline", "moved", "removed", "localMoved", "guildChanged" }) do
+        local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+        receiveQuests(c, "Friend-TestRealm", {}) -- Old peer data must not override a fresh roster check.
+        assert(c.ns.QuestInviteDisabledReason("Friend-TestRealm") == nil)
+        if change == "offline" then c.rosterInfo["Friend-TestRealm"].online = false
+        elseif change == "moved" then c.rosterInfo["Friend-TestRealm"].area = "Westfall"
+        elseif change == "removed" then c.roster = { "Self-TestRealm" }
+        elseif change == "guildChanged" then c.guild, c.roster = "Another Guild", { "Self-TestRealm" }
+        else
+            c.zoneID, c.zoneName = 52, "Westfall"
+            c:fire("ZONE_CHANGED_NEW_AREA")
+        end
+        assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"), change)
+        equal(#c.invites, 0)
+    end
+end)
+test("same-zone invite guards block self unknown targets combat full groups and missing permissions", function()
+    local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    assert(not c.ns.InviteQuestingPlayer("Self-TestRealm"))
+    assert(not c.ns.InviteQuestingPlayer("Unknown-TestRealm"))
+    for _, field in ipairs({ "combat", "partyFull", "instanceGroup" }) do
+        c[field] = true
+        assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+        c[field] = false
+    end
+    c.canInvite = false
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c.canInvite = true
+    c.env.C_PartyInfo.CanInvite = function() error("Party status unavailable") end
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c.env.C_PartyInfo = nil
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    equal(#c.invites, 0)
+end)
+test("failed same-zone invitations are contained and not retried by timers", function()
+    local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    c.failInvite = "Friend-TestRealm"
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c.failInvite = nil
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c:advance(6)
+    equal(#c.invites, 0)
+end)
 test("login withdraws previous queue state and never auto-rejoins", function()
     local c = client({ saved = { roles = 3, dungeons = { [1] = true }, revision = 1800000000999 } })
     assert(not c.ns.queued)
@@ -1193,6 +1257,70 @@ test("Questing tab shows unknown versus zero shared quests and expands completio
     tabs.groups.scripts.OnClick(tabs.groups)
     assert(not card.shown)
     equal(#c.invites, 0)
+end)
+test("same-zone cards have independent click-only Invite buttons and the updated sharing caption", function()
+    local c = client({ roster = { "Self-TestRealm", "Friend-TestRealm", "Other-TestRealm" },
+        rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" },
+            ["Other-TestRealm"] = { area = "Elwynn Forest" } } })
+    local widgets, tabs, cards, consent = openUI(c), {}, {}
+    for _, control in ipairs(widgets) do
+        if control.mainTab then tabs[control.mode] = control end
+        if control.guildQueueKind == "questSharing" then consent = control end
+    end
+    equal(consent.caption.text, "Share my active quests with my guild")
+    tabs.questing.scripts.OnClick(tabs.questing)
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "questMember" and control.shown then cards[#cards + 1] = control end
+    end
+    equal(#cards, 2)
+    c:advance(2)
+    equal(#c.invites, 0)
+    for index, card in ipairs(cards) do
+        equal(card.invite.text, "Invite")
+        assert(card.invite.enabled and card.invite.motionWhileDisabled)
+        assert(card.level.point[2] + card.level:GetWidth() <= card.invite.point[2])
+        assert(card.name.point[2] + card.name:GetWidth() <= card.level.point[2])
+        assert(-card.invite.point[3] + card.invite:GetHeight() <= -card.expand.point[3])
+        card.invite.scripts.OnClick(card.invite)
+        equal(#c.invites, index)
+        equal(c.invites[index], card.member.name)
+        assert(not card.invite.enabled)
+    end
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+    local count = #widgets
+    c.ns.RefreshUI()
+    equal(#widgets, count)
+end)
+test("same-zone Invite buttons explain disabled states and recheck permission at click time", function()
+    local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    local widgets, tab, card = openUI(c)
+    for _, control in ipairs(widgets) do
+        if control.mainTab and control.mode == "questing" then tab = control end
+    end
+    tab.scripts.OnClick(tab)
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "questMember" and control.shown then card = control end
+    end
+    assert(card.invite.enabled)
+    c.canInvite = false -- No refresh/event between render and click.
+    card.invite.scripts.OnClick(card.invite)
+    equal(#c.invites, 0)
+    assert(not card.invite.enabled)
+    card.invite.scripts.OnEnter(card.invite)
+    assert(c.tooltip.shown and c.tooltip.text:find("permission", 1, true))
+    c.canInvite, c.combat = true, true
+    c:fire("PLAYER_REGEN_DISABLED")
+    assert(not card.invite.enabled)
+    c.combat = false
+    c:fire("PLAYER_REGEN_ENABLED")
+    assert(card.invite.enabled)
+    -- Reuse a pooled card for a different guildmate; never retain the old invite target.
+    c.roster = { "Self-TestRealm", "Other-TestRealm" }
+    c.rosterInfo["Other-TestRealm"] = { area = "Elwynn Forest" }
+    c:fire("GUILD_ROSTER_UPDATE")
+    equal(card.invite.memberName, "Other-TestRealm")
+    card.invite.scripts.OnClick(card.invite)
+    equal(c.invites[1], "Other-TestRealm")
 end)
 test("Questing tab retains independent scrolling and keeps expanded text within cards", function()
     local quests, peer = {}, {}

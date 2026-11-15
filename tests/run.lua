@@ -1053,6 +1053,12 @@ local function openUI(c)
             for _, key in ipairs({ "Left", "Middle", "Right", "LeftActive", "MiddleActive", "RightActive" }) do
                 control[key] = control:CreateTexture(nil, "BACKGROUND")
             end
+            -- Actual outer anchors from Forever's PanelTabButtonTemplate:
+            -- artwork extends beyond the button's clickable rectangle.
+            control.Left:SetPoint("TOPLEFT", control, "TOPLEFT", -3, 0)
+            control.Right:SetPoint("TOPRIGHT", control, "TOPRIGHT", 7, 0)
+            control.LeftActive:SetPoint("TOPLEFT", control, "TOPLEFT", -1, 0)
+            control.RightActive:SetPoint("TOPRIGHT", control, "TOPRIGHT", 8, 0)
         end
         return control
     end
@@ -1540,7 +1546,7 @@ test("Auction House-style bottom tabs are Dungeons then Quests and swap entire p
     equal(second.point[1], "LEFT")
     equal(second.point[2], first)
     equal(second.point[3], "RIGHT")
-    equal(second.point[4], -15)
+    equal(second.point[4], 12)
     equal(second.point[5], 0)
     assert(first:GetWidth() > second:GetWidth(), "Auction House tabs size to their text")
     for _, tab in ipairs(mainTabs) do
@@ -1561,6 +1567,26 @@ test("Auction House-style bottom tabs are Dungeons then Quests and swap entire p
     equal(scroll.point[2], 296)
     equal(scroll:GetHeight(), 530)
     assert(c.ns.queued and not c.ns.prefs.shareQuests)
+    equal(#c.invites, 0)
+end)
+test("bottom tab artwork never overlaps its neighbor in either selection state", function()
+    local c = client()
+    local tabs = {}
+    for _, control in ipairs(openUI(c)) do
+        if control.mainTab then tabs[control.mode] = control end
+    end
+    local first, second = tabs.dungeons, tabs.questing
+    for _, selected in ipairs({ "dungeons", "questing", "dungeons" }) do
+        tabs[selected].scripts.OnClick(tabs[selected])
+        equal(first.nativeSelected, selected == "dungeons")
+        equal(second.nativeSelected, selected == "questing")
+        local right = first.nativeSelected and first.RightActive or first.Right
+        local left = second.nativeSelected and second.LeftActive or second.Left
+        assert(right.shown and left.shown)
+        local firstRight = first:GetWidth() + right.point[4]
+        local secondLeft = first:GetWidth() + second.point[4] + left.point[4]
+        assert(secondLeft >= firstRight + 1, "Visible native tab artwork must have a gap, not overlap")
+    end
     equal(#c.invites, 0)
 end)
 test("returning from Quests preserves the selected dungeon view and scroll position", function()

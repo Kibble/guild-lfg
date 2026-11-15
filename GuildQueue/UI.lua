@@ -200,15 +200,16 @@ local function button(parent, text, x, y, width, height, callback, kind)
 end
 
 local function bottomTab(parent, text, previous, callback, tabMode)
-    -- Same base, sizing and anchors as AuctionHouseFrame's display-mode tabs,
-    -- without loading the Auction House addon or its behavior-specific mixins.
+    -- Native Auction House-style tabs without loading its behavior-specific mixins.
     local control = CreateFrame("Button", nil, parent, "PanelTabButtonTemplate")
     control.guildQueueKind, control.mainTab, control.mode = "tab", true, tabMode
     control:SetText(text)
     control.caption = control.Text
     PanelTemplates_TabResize(control, 20, nil, 70)
     if previous then
-        control:SetPoint("LEFT", previous, "RIGHT", -15, 0)
+        -- The art extends 8 pixels right and up to 3 left beyond each button.
+        -- A 12-pixel frame gap keeps both selected/inactive states separate.
+        control:SetPoint("LEFT", previous, "RIGHT", 12, 0)
     else
         control:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 20, -28)
     end

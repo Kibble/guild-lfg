@@ -78,6 +78,19 @@ test("selection validation requires at least one of each", function()
     assert(not ns.Protocol.ValidSelections(4, { [999] = true }))
 end)
 
+test("role filtering preserves exactly the selected roles the class supports", function()
+    for mask = 0, 7 do
+        for allowed = 1, 7 do
+            local filtered = ns.FilterRoles(mask, allowed)
+            for _, role in ipairs({ 1, 2, 4 }) do
+                equal(ns.HasRole(filtered, role), ns.HasRole(mask, role) and ns.HasRole(allowed, role))
+            end
+        end
+    end
+    equal(ns.FilterRoles("bad", 6), 0)
+    equal(ns.FilterRoles(8, 6), 0)
+end)
+
 -- Versioning, leases, tombstones and membership.
 test("out of order and duplicate messages cannot change the live queue", function()
     local state = ns.State.New()
@@ -272,6 +285,8 @@ local function client(options)
         guild = "Test Guild", roster = options.roster or { "Self-TestRealm", "Friend-TestRealm" },
         result = 0, locked = false, homeGroup = false, instanceGroup = false, combat = false }
     c.guildInfoUnavailable, c.nameUnavailable = options.guildInfoUnavailable, options.nameUnavailable
+    c.allowedRoles = options.allowedRoles == nil and 7 or options.allowedRoles
+    c.rolesUnavailable, c.roleAPIError = options.rolesUnavailable, options.roleAPIError
     c.zoneID, c.zoneName, c.level = 37, "Elwynn Forest", 23
     c.questLog, c.rosterInfo, c.mapInfo = options.quests or {}, options.rosterInfo or {}, {}
     if options.noGuild then c.guild = nil end
@@ -286,6 +301,14 @@ local function client(options)
     env.UnitFullName = function()
         if c.nameUnavailable then return nil end
         return options.characterName or "Self", options.characterRealm or "Test Realm"
+    end
+    if not options.noRoleAPI then
+        env.UnitGetAvailableRoles = function(unit)
+            equal(unit, "player")
+            if c.roleAPIError then error("Role data unavailable") end
+            if c.rolesUnavailable then return nil end
+            return c.ns.HasRole(c.allowedRoles, 1), c.ns.HasRole(c.allowedRoles, 2), c.ns.HasRole(c.allowedRoles, 4)
+        end
     end
     env.IsInGuild = function() return c.guild ~= nil end
     env.LE_PARTY_CATEGORY_HOME, env.LE_PARTY_CATEGORY_INSTANCE = 1, 2
@@ -921,6 +944,81 @@ test("join readiness still requires selections and status reports actual blocker
     assert(not c.ns.queued)
     c.ns.prefs.roles, c.ns.prefs.dungeons = 4, { [1] = true }
     assert(c.ns.JoinQueueDisabledReason() == nil)
+end)
+test("saved selections lose unsupported roles without auto-selecting a replacement", function()
+    for _, example in ipairs({ { 6, 7, 6 }, { 6, 1, 0 }, { 4, 7, 4 }, { 5, 7, 5 }, { 7, 7, 7 } }) do
+        local c = client({ allowedRoles = example[1], saved = { roles = example[2], dungeons = { [1] = true } } })
+        equal(c.ns.prefs.roles, example[3])
+        assert(not c.ns.queued)
+    end
+end)
+test("Priest-style class roles reject Tank and scrub queued updates before broadcasting", function()
+    local c = client({ allowedRoles = 6 })
+    c.ns.prefs.roles = 1
+    assert(c.ns.JoinQueueDisabledReason():find("your class", 1, true))
+    c.env.SlashCmdList.GUILDQUEUE("join")
+    assert(not c.ns.queued)
+    c.ns.prefs.roles = 6
+    c.ns.SetQueued(true)
+    c:advance(1)
+    local joinedAt = c.ns.joinedAt
+    c.ns.prefs.roles = 7 -- Also guard changes that bypass the checkbox callback.
+    c:advance(1)
+    equal(c.ns.prefs.roles, 6)
+    equal(c.ns.state.records[c.ns.playerName].roles, 6)
+    equal(c.ns.joinedAt, joinedAt)
+    for _, sent in ipairs(c.sent) do
+        local decoded = c.ns.Protocol.Decode(sent.text)
+        if decoded and decoded.kind == "S" then assert(not c.ns.HasRole(decoded.roles, 1)) end
+    end
+end)
+test("removing the final supported role immediately withdraws a queued player", function()
+    local c = client({ allowedRoles = 6 })
+    c.ns.SetQueued(true)
+    c:advance(1)
+    c.ns.prefs.roles = 1
+    c.ns.PreferencesChanged()
+    equal(c.ns.prefs.roles, 0)
+    assert(not c.ns.queued and not c.ns.state.records[c.ns.playerName])
+    c:advance(1)
+    equal(c.ns.Protocol.Decode(c.sent[#c.sent].text).kind, "X")
+end)
+test("missing role data blocks only queue entry and recovers without auto-joining", function()
+    for _, options in ipairs({ { noRoleAPI = true }, { rolesUnavailable = true },
+        { roleAPIError = true }, { allowedRoles = 0 } }) do
+        options.saved = { roles = 7, dungeons = { [1] = true } }
+        local c = client(options)
+        assert(c.ns.IsReady()) -- Never make the guild roster a class-data dependency.
+        equal(c.ns.JoinQueueDisabledReason(), "Waiting for your class role information.")
+        c.ns.SetQueued(true)
+        assert(not c.ns.queued)
+        c.env.UnitGetAvailableRoles = function() return false, true, true end
+        c:advance(1)
+        equal(c.ns.prefs.roles, 6)
+        assert(c.ns.JoinQueueDisabledReason() == nil and not c.ns.queued)
+    end
+end)
+test("temporary role API loss keeps the last valid class capabilities", function()
+    local c = client({ allowedRoles = 6 })
+    c.ns.SetQueued(true)
+    c:advance(1)
+    c.rolesUnavailable = true
+    c:advance(20)
+    equal(c.ns.AllowedRoles(), 6)
+    assert(c.ns.queued and c.ns.RoleDisabledReason(1))
+    equal(c.ns.state.records[c.ns.playerName].roles, 4)
+end)
+test("malformed or restricted native role values are never used as role selections", function()
+    local c = client({ rolesUnavailable = true })
+    local restricted = {}
+    c.env.hasanysecretvalues = function(...) return select(1, ...) == restricted end
+    c.env.UnitGetAvailableRoles = function() return restricted, true, true end
+    assert(c.ns.AllowedRoles() == nil)
+    c.env.UnitGetAvailableRoles = function() return 1, true, true end
+    assert(c.ns.AllowedRoles() == nil)
+    assert(c.ns.RoleDisabledReason(1))
+    c.ns.SetQueued(true)
+    assert(not c.ns.queued)
 end)
 test("join, heartbeat, selection update and manual withdrawal", function()
     local c = client()
@@ -1627,6 +1725,43 @@ test("role selectors use native tank, healer and damage icons and remain multi-s
     checks[2]:SetChecked(false)
     checks[2].scripts.OnClick(checks[2])
     equal(c.ns.prefs.roles, 5)
+    equal(#c.invites, 0)
+end)
+test("role selectors follow class capabilities and unavailable roles explain why on hover", function()
+    for _, allowed in ipairs({ 4, 5, 6, 7 }) do
+        local c = client({ allowedRoles = allowed })
+        local widgets = openUI(c)
+        for _, control in ipairs(widgets) do
+            if control.guildQueueKind == "role" then
+                local supported = c.ns.HasRole(allowed, control.role)
+                equal(control.enabled, supported)
+                equal(control.roleIcon.desaturated, not supported)
+                if not supported then
+                    assert(control.motionWhileDisabled)
+                    control.scripts.OnEnter(control)
+                    assert(c.tooltip.shown and c.tooltip.text:find("Your class cannot queue", 1, true))
+                    control:SetChecked(true)
+                    control.scripts.OnClick(control) -- Even a direct callback cannot bypass the restriction.
+                    assert(not c.ns.HasRole(c.ns.prefs.roles, control.role))
+                    assert(not control:GetChecked())
+                end
+            end
+        end
+    end
+end)
+test("Priest-style role selection retains Healer plus Damage and never enables Tank", function()
+    local c = client({ allowedRoles = 6 })
+    local controls = {}
+    for _, control in ipairs(openUI(c)) do
+        if control.guildQueueKind == "role" then controls[control.role] = control end
+    end
+    controls[2]:SetChecked(true)
+    controls[2].scripts.OnClick(controls[2])
+    equal(c.ns.prefs.roles, 6)
+    assert(not controls[1].enabled)
+    c.ns.SetQueued(true)
+    c:advance(1)
+    equal(c.ns.state.records[c.ns.playerName].roles, 6)
     equal(#c.invites, 0)
 end)
 test("group tiles show assigned-role icons separately from multi-role preferences", function()

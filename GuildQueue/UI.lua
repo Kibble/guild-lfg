@@ -649,6 +649,10 @@ function ns.RefreshUI()
     joinButton:SetEnabled(ns.queued or ns.JoinQueueDisabledReason() == nil)
     paint(joinButton)
     for role, control in pairs(roleChecks) do
+        local reason = ns.RoleDisabledReason(role)
+        control:SetEnabled(reason == nil)
+        control.tooltipText = reason or "Select one or more roles available for your class."
+        control.roleIcon:SetDesaturated(reason ~= nil)
         control:SetChecked(ns.HasRole(ns.prefs.roles, role))
         paint(control)
     end
@@ -730,6 +734,10 @@ local function createUI()
     for index, role in ipairs({ 1, 2, 4 }) do
         local control = check(sidebar, ns.ROLE_NAMES[role], 12 + (index - 1) * 80, 64, 76, 76,
             function(self)
+                if ns.RoleDisabledReason(self.role) then
+                    ns.PreferencesChanged()
+                    return
+                end
                 local hadRole = ns.HasRole(ns.prefs.roles, self.role)
                 if self:GetChecked() and not hadRole then
                     ns.prefs.roles = ns.prefs.roles + self.role
@@ -739,6 +747,7 @@ local function createUI()
                 ns.PreferencesChanged()
             end, "role", role)
         control.role = role
+        control:SetMotionScriptsWhileDisabled(true)
         roleChecks[role] = control
     end
     solid(sidebar, 14, 156, 232, 1, C.border)

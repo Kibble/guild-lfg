@@ -1,6 +1,6 @@
 # Guild Queue — WoW:Forever addon
 
-**Version 0.8.0 — same-zone member invitations; needs in-client visual and multiplayer confirmation.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
+**Version 0.9.0 — class-based role restrictions; needs in-client visual and multiplayer confirmation.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
 
 ## Screenshot
 
@@ -18,7 +18,7 @@ These are older design mockups, not in-game captures. They do not show the 0.7.2
 
 ## What it does
 
-- Select any combination of **Tank**, **Healer**, and **Damage** using WoW's native shield, healing-cross, and damage role icons with checkbox overlays.
+- Select any combination of **Tank**, **Healer**, and **Damage** that Forever recommends for your class, using native role icons with checkbox overlays. Unsupported roles are disabled with hover explanations.
 - Select one or more dungeons, including Forever's nine new dungeons.
 - Join a shared queue visible to guild members running the same addon version.
 - Suggest five-player groups: **one tank, one healer, three damage dealers**. Each player fills exactly one of their selected roles, and all five must share at least one selected dungeon.
@@ -38,7 +38,7 @@ Players explicitly leave the queue when no longer looking. Requesting invitation
 
 ## Install
 
-[Download GuildQueue-0.8.0.zip](GuildQueue-0.8.0.zip) and extract the `GuildQueue` folder.
+[Download GuildQueue-0.9.0.zip](GuildQueue-0.9.0.zip) and extract the `GuildQueue` folder.
 
 1. Close the game client.
 2. Extract the download and copy its **`GuildQueue` folder** into your Forever installation's `Interface/AddOns` directory. The resulting file must be `Interface/AddOns/GuildQueue/GuildQueue.toc`.
@@ -53,6 +53,10 @@ Additional commands: `/gq join` uses your current selections; `/gq leave` withdr
 Use Battle.net's **Show in Explorer** to find your installation; the launch client's folder is normally `_forever_`. Other files in this download are development files and do not need to be installed.
 
 **Updating from an earlier version:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
+
+**Class roles in 0.9.0:** role selection now follows Forever's own `UnitGetAvailableRoles("player")` class-role recommendations, enforced as the addon's allowlist instead of a hardcoded Retail class table. Unsupported roles are disabled and grayed out with an explanatory hover tooltip. For example, a Priest can select Healer and/or Damage, not Tank. Saved preferences lose unsupported roles; if none remain, explicitly choose an allowed role rather than having one selected automatically. Joining, preference updates and outgoing queue states all enforce the restriction. Losing the last valid selection withdraws the queue entry. If class data has not loaded, queue entry waits; temporary API loss retains the last valid capabilities for that character. Other features remain available.
+
+The queue wire format is unchanged. **Every guild member must update to get restrictions on their own selections.** Incoming selections remain self-reported; older clients can still advertise unsupported roles until updated. This does not validate talents, active specialization, gear or dungeon eligibility. The native API also decides any Forever-specific class exceptions, rather than copying assumptions from Retail. API source: [Forever UnitRole documentation](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/UnitRoleDocumentation.lua).
 
 **Same-zone invitations in 0.8.0:** renames the consent checkbox to **Share my active quests with my guild** and adds a per-member **Invite** button. Invites are click-only, refresh eligibility at click time, and have a five-second per-person cooldown; failed requests are never retried automatically. Existing groups can invite when WoW permits it, unlike **Create party**, which still requires being solo. The consent tooltip continues to disclose zone ID and level as snapshot context; the wire format and opt-in behavior are unchanged. Guild-roster zones remain available without quest sharing.
 
@@ -88,7 +92,7 @@ Every client independently computes the same result **when it has the same live 
 
 Matching prioritizes older feasible candidates, breaks equal-age ties by full character name, and handles multi-role reassignment. It is not a global optimizer for the maximum possible number of groups across all dungeon combinations. Suggestions may change as the queue changes.
 
-Dungeon selections are preferences, **not eligibility checks**: this version does not validate level, quests, keys, attunements, lockouts, travel, or class suitability for a selected role. The catalog uses permanent addon-local IDs, not Blizzard activity IDs. Larger-party activities are outside this five-player matcher.
+Dungeon selections are preferences, **not eligibility checks**: this version does not validate level, quests, keys, attunements, lockouts, travel, or talent/spec/gear suitability for a selected class-supported role. The catalog uses permanent addon-local IDs, not Blizzard activity IDs. Larger-party activities are outside this five-player matcher.
 
 ## Questing and privacy
 
@@ -108,11 +112,11 @@ Automated Lua tests are included in `tests/run.lua`, covering protocol validatio
 
 Run from the project root with **Lua 5.1**: `lua5.1 tests/run.lua` and `lua5.1 tests/questing.lua`. Lua is a development tool only and is not required by players.
 
-**Current status:** all **126 automated tests passed** under **Lua 5.1.5** (91 core/UI tests and 35 quest protocol tests), including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Questing tests cover click-only single-member invitations without addon peers or quest sharing, fresh roster and zone checks, invitation permissions/capacity/combat, failure containment, per-person cooldowns, disabled hover tooltips, pooled-card target reuse, the updated consent caption, the prominent same-zone guild heading, live zone subtitle updates, non-overlapping header/controls/member-card layout, same-zone roster fallback, unavailable versus zero data, opt-in and withdrawal, strict guild filtering, log/zone changes, multipart limits/ordering/expiry, copy safety, cancellation of unsent fragments, scheduler rate limits, expansion, independent tab scrolling, native bottom-tab order and selection, Auction House tab anchors/padding/minimum width, non-overlapping native tab artwork in either selection state, identical artwork geometry and label placement across selection changes and hover styles, gold versus grayscale coloring, full-width Quests layout, and restoring the last dungeon view. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
+**Current status:** all **135 automated tests passed** under **Lua 5.1.5** (100 core/UI tests and 35 quest protocol tests), including the 200 generated-queue feasibility comparisons, click-only invitation requests, already-grouped disabled-button tooltips, live addon-presence expiry and guild-reset behavior, and simulated UI interactions. Regression coverage verifies queuing/matching with an empty roster or no legacy roster APIs, guild-only message filtering, delayed identity recovery, clearing old data on guild changes, explanatory Join queue tooltips, self-message deduplication, and distinct same-named characters on different realms. UI checks cover native frame/button/checkbox templates, opaque panel fills, five-member tiles, card reuse, scrolling/clamping, and label bounds. Role restriction tests cover native class capabilities, invalid saved selections, Priest-style Healer/Damage selection, disabled-role tooltips, callback/slash-command bypass attempts, outgoing-state sanitization, withdrawal, delayed/missing/restricted API data and recovery without auto-joining. UI tests verify multi-select role icons, assigned versus selected-role icons, clearing stale icons on pooled individual/all-queued cards, icon bounds, the online-addon counter, and pressed-state native tabs. Presence checks verify 20-second idle heartbeats, 75-second expiry, self-counting, guild-channel filtering, and reset on guild changes. Questing tests cover click-only single-member invitations without addon peers or quest sharing, fresh roster and zone checks, invitation permissions/capacity/combat, failure containment, per-person cooldowns, disabled hover tooltips, pooled-card target reuse, the updated consent caption, the prominent same-zone guild heading, live zone subtitle updates, non-overlapping header/controls/member-card layout, same-zone roster fallback, unavailable versus zero data, opt-in and withdrawal, strict guild filtering, log/zone changes, multipart limits/ordering/expiry, copy safety, cancellation of unsent fragments, scheduler rate limits, expansion, independent tab scrolling, native bottom-tab order and selection, Auction House tab anchors/padding/minimum width, non-overlapping native tab artwork in either selection state, identical artwork geometry and label placement across selection changes and hover styles, gold versus grayscale coloring, full-width Quests layout, and restoring the last dungeon view. Static source/package checks also passed. Tests use simulated WoW APIs: they are not a substitute for visual and live multi-player testing inside WoW.
 
 Before wider use, test with at least five addon-equipped guild characters:
 
-1. Create a compatible tank/healer/three-damage selection and verify a common-dungeon group appears on all clients.
+1. Verify class-role restrictions first: a Priest can select Healer and Damage but not Tank; a damage-only class cannot select Tank or Healer. Unsupported icons should be gray and explain why on hover. Upgrade characters with old incompatible saved selections and confirm those selections are removed. Then create a compatible tank/healer/three-damage queue and verify a common-dungeon group appears on all updated clients.
 2. Select multiple roles and overlapping/disjoint dungeons; verify nobody is duplicated and incompatible selections remain unmatched.
 3. Join before opening the Guild window and verify that no roster-cache wait blocks you. Your own guild-message echo must not add a second entry or rejoin you after withdrawal. With a late-loading client, change preferences, leave, `/reload`, and disconnect; verify synchronization and expiry.
 4. Verify that matching and queue updates never issue invitations. Click **Create party** while solo and verify that exactly the other four players receive invitations and must accept manually.

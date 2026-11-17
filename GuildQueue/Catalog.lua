@@ -55,6 +55,16 @@ function ns.HasRole(mask, role)
     return math.floor(mask / role) % 2 == 1
 end
 
+-- Intersect selections without depending on a client bit-operation library.
+function ns.FilterRoles(mask, allowed)
+    if type(mask) ~= "number" or mask % 1 ~= 0 or mask < 0 or mask > 7 then return 0 end
+    local filtered = 0
+    for _, role in ipairs({ 1, 2, 4 }) do
+        if ns.HasRole(mask, role) and ns.HasRole(allowed, role) then filtered = filtered + role end
+    end
+    return filtered
+end
+
 function ns.RoleText(mask)
     local names = {}
     for _, role in ipairs({ 1, 2, 4 }) do

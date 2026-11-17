@@ -8,6 +8,7 @@ local registered, started = false, false
 local transportError
 local lastPartyInviteAt = -100
 local lastQuestInviteAt = {}
+local availableRoles
 ns.queued = false
 ns.state = ns.State.New()
 ns.groups, ns.individuals = {}, {}
@@ -58,6 +59,37 @@ end
 
 local function boundedNumber(value, minimum, maximum)
     return type(value) == "number" and value >= minimum and value <= maximum and value % 1 == 0
+end
+
+-- Class capabilities, not the current assigned party role or specialization.
+-- Keep the last valid answer through loading screens; class cannot change in-session.
+function ns.AllowedRoles()
+    if type(UnitGetAvailableRoles) == "function" then
+        local ok, tank, healer, damage = pcall(UnitGetAvailableRoles, "player")
+        if ok and not secret(tank, healer, damage) and type(tank) == "boolean"
+            and type(healer) == "boolean" and type(damage) == "boolean" then
+            local mask = (tank and 1 or 0) + (healer and 2 or 0) + (damage and 4 or 0)
+            if mask > 0 then availableRoles = mask end
+        end
+    end
+    return availableRoles
+end
+
+function ns.RoleDisabledReason(role)
+    local allowed = ns.AllowedRoles()
+    if not allowed then return "Waiting for your class role information." end
+    if not ns.HasRole(allowed, role) then
+        return "Your class cannot queue as " .. (ns.ROLE_NAMES[role] or "this role") .. "."
+    end
+end
+
+local function restrictRoles()
+    local allowed = ns.AllowedRoles()
+    if not allowed or not ns.prefs then return false end
+    local selected = ns.FilterRoles(ns.prefs.roles, allowed)
+    if selected == ns.prefs.roles then return false end
+    ns.prefs.roles = selected
+    return true
 end
 
 local function scanLocalQuests()
@@ -217,6 +249,11 @@ function ns.JoinQueueDisabledReason()
     if not ns.IsReady() then
         return ns.StatusText()
     end
+    local allowed = ns.AllowedRoles()
+    if not allowed then return "Waiting for your class role information." end
+    if ns.FilterRoles(ns.prefs.roles, allowed) ~= ns.prefs.roles then
+        return "Select only roles available for your class."
+    end
     if not ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
         return "Select at least one role and one dungeon."
     end
@@ -327,8 +364,9 @@ function ns.SetQueued(wanted)
 end
 
 function ns.PreferencesChanged()
+    restrictRoles()
     if ns.queued then
-        if ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
+        if ns.AllowedRoles() and ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
             requestState(0)
         else
             ns.SetQueued(false)
@@ -467,6 +505,10 @@ local function send(message)
 end
 
 local function sendState()
+    if ns.queued then
+        if not ns.AllowedRoles() then return false end
+        if restrictRoles() then ns.PreferencesChanged() end
+    end
     local now = GetServerTime()
     -- Persist only preferences and an ordering counter, never active queue membership.
     -- Server-time seeding also helps when the character logs in on another computer.
@@ -534,6 +576,7 @@ local function tick()
     end
     local clock = GetTime()
     updateGuild()
+    if restrictRoles() then ns.PreferencesChanged() end
     if localDirty or clock - lastLocalScan >= ns.HEARTBEAT then scanLocalQuests() end
     local serverNow = GetServerTime()
     ns.questing:Prune(serverNow)
@@ -644,6 +687,7 @@ local function initialize()
         or ns.prefs.roles < 0 or ns.prefs.roles > 7 or ns.prefs.roles % 1 ~= 0 then
         ns.prefs.roles = 4
     end
+    restrictRoles()
     local dungeons = {}
     if type(ns.prefs.dungeons) == "table" then
         for _, dungeon in ipairs(ns.DUNGEONS) do

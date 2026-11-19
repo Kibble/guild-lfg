@@ -133,7 +133,7 @@ local function showPartyTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
     GameTooltip:SetText("Create party")
     GameTooltip:AddLine(ns.CreatePartyDisabledReason(control.group)
-        or "Invite the other four players in this suggested group. Each player must accept.",
+        or "Invite the other matched guild members. Each player must accept.",
         1, 1, 1, true)
     GameTooltip:Show()
 end
@@ -321,7 +321,7 @@ local function scrollArea(parent, x, y, width, height, kind)
 end
 
 local function includesPlayer(group)
-    for _, player in ipairs(group.slots) do
+    for _, player in ipairs(group.members) do
         if player.name == ns.playerName then return true end
     end
     return false
@@ -382,7 +382,11 @@ local function renderGroup(group, index, own, y)
     card.band:SetShown(own)
     card.accent:SetShown(own)
     card.group = group
-    card.kicker:SetText(own and "YOUR SUGGESTED GROUP" or ("SUGGESTED GROUP " .. index))
+    local count = #group.members
+    card.matched:SetText(count .. " / 5 matched")
+    colorText(card.matched, count == 5 and C.green or C.heading)
+    card.kicker:SetText(own and (count < 5 and "YOUR PARTIAL MATCH" or "YOUR SUGGESTED GROUP")
+        or ("SUGGESTED GROUP " .. index))
     local dungeon = ns.DUNGEON_BY_ID[group.dungeonID]
     local title = dungeon and dungeon.name or "Shared dungeon"
     card.title:SetText(ns.SafeText(title))
@@ -392,8 +396,10 @@ local function renderGroup(group, index, own, y)
     for slot, tile in ipairs(card.tiles) do
         local player = group.slots[slot]
         place(tile, 14 + (slot - 1) * 141, own and 110 or 102, 135, own and 68 or 56)
+        tile:Show()
+        tile.roleIcon:SetDesaturated(not player)
+        colorText(tile.roleLabel, player and C.heading or C.muted)
         if player then
-            tile:Show()
             tile.name:SetText(displayName(player))
             colorText(tile.name, player.name == ns.playerName and C.green or C.text)
             updateRoleIcons(tile.roleIcons, own and player.roles or 0, 9, 47, 16)
@@ -401,12 +407,21 @@ local function renderGroup(group, index, own, y)
                 player.name == ns.playerName and C.green or C.border)
             playerTooltip(tile, player)
         else
-            tile:Hide()
+            tile.player = nil
+            tile.name:SetText("Needed")
+            colorText(tile.name, C.muted)
+            updateRoleIcons(tile.roleIcons, 0, 9, 47, 16)
+            surface(tile, C.tile, C.border)
+            tile.tooltipTitle = ns.ROLE_NAMES[ns.SLOTS[slot]] .. " needed"
+            tile.tooltipText = "Open role slot. Waiting for a compatible guild member who shares a dungeon."
         end
     end
     card.note:SetShown(own)
     if own then
-        card.note:SetText("You + 4 guildmates. Everyone must accept their invitation.")
+        card.note:SetText("You + " .. (count - 1) .. (count == 2 and " guildmate. " or " guildmates. ")
+            .. (count < 5 and ((5 - count) .. (count == 4 and " open slot. " or " open slots. ")
+                .. "Invitations are manual.")
+                or "Everyone must accept their invitation."))
         if not card.createParty then
             card.createParty = button(card, "Create party", 526, 188, 188, 28, function(control)
                 if control.group then ns.CreateParty(control.group) end
@@ -568,16 +583,16 @@ local function renderOutput(players)
     elseif mode == "groups" then
         local ownIndex
         for index, group in ipairs(ns.groups) do
-            if #group.slots == 5 and includesPlayer(group) then
+            if includesPlayer(group) then
                 ownIndex = index
                 break
             end
         end
         if ownIndex then y = renderGroup(ns.groups[ownIndex], ownIndex, true, y) end
         if #ns.groups == 0 then
-            y = emptyCard("No complete groups yet",
-                "A group needs a tank, a healer and three damage players who share a dungeon. "
-                    .. "Keep your selections open while more guildmates queue.", y)
+            y = emptyCard("No compatible matches yet",
+                "Two or more players need a shared dungeon and compatible role slots. "
+                    .. "You can start a party before all five slots are filled.", y)
         end
         if #ns.groups > (ownIndex and 1 or 0) then
             y = heading(ownIndex and "Other suggested groups" or "Suggested groups",

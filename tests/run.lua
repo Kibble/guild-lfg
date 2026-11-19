@@ -35,8 +35,9 @@ local function signature(groups, individuals)
     local values = {}
     for _, group in ipairs(groups) do
         values[#values + 1] = tostring(group.dungeonID)
-        for slot, player in ipairs(group.slots) do
-            values[#values + 1] = slot .. ":" .. player.name
+        for slot = 1, #ns.SLOTS do
+            local player = group.slots[slot]
+            if player then values[#values + 1] = slot .. ":" .. player.name end
         end
     end
     values[#values + 1] = "individuals"
@@ -151,12 +152,87 @@ test("selection changes are copied and retain queue age", function()
 end)
 
 -- Matching constraints and deterministic fairness.
-test("no complete group without all five role slots", function()
+test("damage-only partial groups never fill nonexistent tank or healer slots", function()
     local state = ns.State.New()
     for i = 1, 6 do add(state, "D" .. i, 4) end
     local groups, individuals = ns.Match(state)
-    equal(#groups, 0)
-    equal(#individuals, 6)
+    equal(#groups, 2)
+    equal(#individuals, 0)
+    for _, group in ipairs(groups) do
+        equal(#group.members, 3)
+        assert(not group.slots[1] and not group.slots[2])
+        for slot = 3, 5 do assert(group.slots[slot]) end
+    end
+end)
+test("healer and damage form a partial match with a genuinely empty tank slot", function()
+    local state = ns.State.New()
+    add(state, "Healer", 2, { [1] = true, [2] = true })
+    add(state, "Damage", 4, { [1] = true })
+    local groups, individuals = ns.Match(state)
+    equal(#groups, 1)
+    equal(#individuals, 0)
+    equal(#groups[1].members, 2)
+    assert(not groups[1].slots[1])
+    equal(groups[1].slots[2].name, "Healer")
+    assert(groups[1].dungeons[1] and not groups[1].dungeons[2])
+end)
+test("partial matching reassigns flexible roles rather than rejecting a compatible peer", function()
+    local state = ns.State.New()
+    add(state, "A-Flexible", 3, nil, 800)
+    add(state, "B-Tank", 1, nil, 801)
+    local groups = ns.Match(state)
+    equal(#groups[1].members, 2)
+    equal(groups[1].slots[1].name, "B-Tank")
+    equal(groups[1].slots[2].name, "A-Flexible")
+    assert(not groups[1].slots[3])
+end)
+test("singletons incompatible roles and disjoint dungeons remain individuals", function()
+    for _, pair in ipairs({ { 1, 1, 1 }, { 2, 2, 1 }, { 2, 4, 2 } }) do
+        local state = ns.State.New()
+        add(state, "First", pair[1], { [1] = true })
+        local groups, individuals = ns.Match(state)
+        equal(#groups, 0)
+        equal(#individuals, 1)
+        add(state, "Second", pair[2], { [pair[3]] = true })
+        groups, individuals = ns.Match(state)
+        equal(#groups, 0)
+        equal(#individuals, 2)
+    end
+end)
+test("complete matches take priority over older partial matches", function()
+    local state = ns.State.New()
+    add(state, "Old-Tank", 1, { [1] = true }, 800)
+    add(state, "Old-Healer", 2, { [1] = true }, 801)
+    for index, role in ipairs({ 1, 2, 4, 4, 4 }) do
+        add(state, "New" .. index, role, { [2] = true }, 810 + index)
+    end
+    local groups, individuals = ns.Match(state)
+    equal(#groups, 2)
+    equal(#groups[1].members, 5)
+    equal(groups[1].dungeonID, 2)
+    equal(#groups[2].members, 2)
+    equal(groups[2].dungeonID, 1)
+    equal(#individuals, 0)
+end)
+test("partial matches prefer larger groups then oldest compatible candidates", function()
+    local state = ns.State.New()
+    add(state, "Old-Tank", 1, { [1] = true }, 800)
+    add(state, "Old-Healer", 2, { [1] = true }, 801)
+    for index, role in ipairs({ 2, 4, 4, 4 }) do
+        add(state, "New" .. index, role, { [2] = true }, 810 + index)
+    end
+    local groups = ns.Match(state)
+    equal(#groups[1].members, 4)
+    equal(groups[1].dungeonID, 2)
+    equal(#groups[2].members, 2)
+    -- Equal-sized candidates: age wins, even when its dungeon ID is larger.
+    local tied = ns.State.New()
+    add(tied, "Tank", 1, { [1] = true, [2] = true }, 800)
+    add(tied, "Older-Healer", 2, { [2] = true }, 801)
+    add(tied, "Newer-Healer", 2, { [1] = true }, 802)
+    local tiedGroups, individuals = ns.Match(tied)
+    equal(tiedGroups[1].dungeonID, 2)
+    equal(individuals[1].name, "Newer-Healer")
 end)
 test("multi-role tank/healer can be reassigned to make a valid group", function()
     local state = ns.State.New()
@@ -175,8 +251,10 @@ test("pairwise dungeon overlap is insufficient without a common dungeon", functi
     add(state, "Heal", 2, { [2] = true, [3] = true })
     for i = 1, 3 do add(state, "D" .. i, 4, { [1] = true, [3] = true }) end
     local groups, individuals = ns.Match(state)
-    equal(#groups, 0)
-    equal(#individuals, 5)
+    equal(#groups, 1)
+    equal(#groups[1].members, 4) -- No full five-player match from pairwise overlap.
+    equal(#individuals, 1)
+    for _, member in ipairs(groups[1].members) do assert(member.dungeons[groups[1].dungeonID]) end
 end)
 test("common dungeons and assigned roles are retained", function()
     local state, selected = ns.State.New(), { [1] = true, [2] = true }
@@ -194,10 +272,10 @@ test("each queued player appears exactly once across groups and individuals", fu
     local state, seen = ns.State.New(), {}
     for i = 1, 13 do add(state, "Player" .. i, 7, nil, 800 + i) end
     local groups, individuals = ns.Match(state)
-    equal(#groups, 2)
-    equal(#individuals, 3)
+    equal(#groups, 3)
+    equal(#individuals, 0)
     for _, group in ipairs(groups) do
-        for _, player in ipairs(group.slots) do
+        for _, player in ipairs(group.members) do
             assert(not seen[player.name])
             seen[player.name] = true
         end
@@ -209,7 +287,10 @@ test("each queued player appears exactly once across groups and individuals", fu
     local count = 0
     for _ in pairs(seen) do count = count + 1 end
     equal(count, 13)
-    equal(individuals[1].name, "Player11")
+    equal(#groups[3].members, 3)
+    local lastNames = {}
+    for _, member in ipairs(groups[3].members) do lastNames[member.name] = true end
+    assert(lastNames.Player11 and lastNames.Player12 and lastNames.Player13)
 end)
 test("input insertion order does not affect matching", function()
     local forward, reverse = ns.State.New(), ns.State.New()
@@ -241,7 +322,21 @@ local function possible(players, dungeonID, slot, used)
     end
     return false
 end
-test("matcher agrees with brute-force feasibility on 200 generated queues", function()
+-- Independent exhaustive assignment with optional empty slots, for partial matches.
+local function maximumMatch(players, dungeonID, slot, used)
+    if slot > #ns.SLOTS then return 0 end
+    local best = maximumMatch(players, dungeonID, slot + 1, used)
+    for index, player in ipairs(players) do
+        if not used[index] and player.dungeons[dungeonID] and ns.HasRole(player.roles, ns.SLOTS[slot]) then
+            used[index] = true
+            best = math.max(best, 1 + maximumMatch(players, dungeonID, slot + 1, used))
+            used[index] = nil
+        end
+    end
+    return best
+end
+
+test("matcher agrees with brute-force full and partial feasibility on 200 generated queues", function()
     math.randomseed(314159)
     for iteration = 1, 200 do
         local state = ns.State.New()
@@ -256,15 +351,30 @@ test("matcher agrees with brute-force feasibility on 200 generated queues", func
         local feasible = false
         for id = 1, 3 do feasible = feasible or possible(players, id, 1, {}) end
         local groups, individuals = ns.Match(state)
-        equal(#groups > 0, feasible)
-        local seen = {}
+        equal(groups[1] ~= nil and #groups[1].members == 5, feasible)
+        local seen, remaining = {}, players
         for _, group in ipairs(groups) do
-            for slot, player in ipairs(group.slots) do
-                assert(not seen[player.name])
-                seen[player.name] = true
-                assert(ns.HasRole(player.roles, ns.SLOTS[slot]))
-                assert(player.dungeons[group.dungeonID])
+            local best = 0
+            for id = 1, 3 do best = math.max(best, maximumMatch(remaining, id, 1, {})) end
+            equal(#group.members, best)
+            local occupied = 0
+            for slot = 1, #ns.SLOTS do
+                local player = group.slots[slot]
+                if player then
+                    occupied = occupied + 1
+                    assert(not seen[player.name])
+                    seen[player.name] = true
+                    assert(ns.HasRole(player.roles, ns.SLOTS[slot]))
+                    assert(player.dungeons[group.dungeonID])
+                    for id in pairs(group.dungeons) do assert(player.dungeons[id]) end
+                end
             end
+            equal(occupied, #group.members)
+            local rest = {}
+            for _, player in ipairs(remaining) do
+                if not seen[player.name] then rest[#rest + 1] = player end
+            end
+            remaining = rest
         end
         for _, player in ipairs(individuals) do
             assert(not seen[player.name])
@@ -273,7 +383,7 @@ test("matcher agrees with brute-force feasibility on 200 generated queues", func
         local count = 0
         for _ in pairs(seen) do count = count + 1 end
         equal(count, #players)
-        for id = 1, 3 do assert(not possible(individuals, id, 1, {})) end
+        for id = 1, 3 do assert(maximumMatch(individuals, id, 1, {}) < 2) end
     end
 end)
 
@@ -417,6 +527,60 @@ local function suggestedGroup(c)
     equal(#c.ns.groups, 1)
     return c.ns.groups[1]
 end
+
+local function suggestedPartial(c, count)
+    c.ns.prefs.roles = 2
+    c.ns.SetQueued(true)
+    c:advance(1)
+    for index = 1, count - 1 do
+        c:receive("PartialD" .. index .. "-TestRealm", packet(1, 4, nil, c.now, c.now))
+    end
+    equal(#c.ns.groups, 1)
+    equal(#c.ns.groups[1].members, count)
+    assert(not c.ns.groups[1].slots[1])
+    return c.ns.groups[1]
+end
+
+test("partial Create party requests only the other one to three matched players", function()
+    for size = 2, 4 do
+        local c = client({ roster = {} })
+        local group = suggestedPartial(c, size)
+        equal(#c.invites, 0)
+        c.inviteCreatesParty = true -- Still submit the entire clicked batch.
+        assert(c.ns.CreateParty(group))
+        equal(#c.invites, size - 1)
+        local seen = {}
+        for _, name in ipairs(c.invites) do
+            assert(name ~= c.ns.playerName and not seen[name])
+            seen[name] = true
+        end
+        assert(c.ns.CreatePartyDisabledReason(group):find("already in a party", 1, true))
+        c:advance(20)
+        equal(#c.invites, size - 1)
+    end
+end)
+test("partial invitations reject stale or expired members before sending any request", function()
+    local c = client()
+    local old = suggestedPartial(c, 4)
+    local last = old.members[#old.members]
+    c.ns.state.records[last.name].sentAt = c.now - c.ns.TIMEOUT
+    assert(not c.ns.CreateParty(old))
+    equal(#c.invites, 0)
+    c.ns.state.records[last.name].sentAt = c.now
+    c:receive(last.name, { kind = "X", revision = 2, sentAt = c.now })
+    assert(not c.ns.CreateParty(old))
+    equal(#c.invites, 0)
+end)
+test("partial invitation failures and repeat clicks never cause automatic retries", function()
+    local c = client()
+    local group = suggestedPartial(c, 4)
+    c.failInvite = "PartialD2-TestRealm"
+    assert(not c.ns.CreateParty(group))
+    equal(#c.invites, 2)
+    assert(not c.ns.CreateParty(group))
+    c:advance(20)
+    equal(#c.invites, 2)
+end)
 
 test("an empty guild roster does not block queuing or guild-only synchronization", function()
     local c = client({ roster = {} })
@@ -1504,7 +1668,7 @@ test("Create party button is hoverable when disabled and tracks party changes", 
     c.homeGroup = false
     c:fire("GROUP_ROSTER_UPDATE")
     assert(control.enabled)
-    assert(c.tooltip.text:find("Invite the other four", 1, true))
+    assert(c.tooltip.text:find("Invite the other matched", 1, true))
     c.combat = true
     c:fire("PLAYER_REGEN_DISABLED")
     assert(not control.enabled)
@@ -1518,8 +1682,11 @@ test("Create party button is hoverable when disabled and tracks party changes", 
     c:advance(6)
     assert(control.enabled)
     c:receive("Friend-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
-    assert(not control.shown)
-    assert(not c.tooltip.shown)
+    assert(control.shown and control.enabled) -- Four-player partial match can still start a party.
+    for _, name in ipairs({ "D1-TestRealm", "D2-TestRealm", "D3-TestRealm" }) do
+        c:receive(name, { kind = "X", revision = 2, sentAt = c.now })
+    end
+    assert(not control.shown and not c.tooltip.shown)
 end)
 test("Create party controls hide on the all-queued tab without issuing invites", function()
     local c = client()
@@ -1593,6 +1760,94 @@ test("UI uses native WoW borders, buttons, checkboxes and close-button artwork",
     equal(main:GetWidth(), 1060)
     equal(main:GetHeight(), 740)
 end)
+test("a healer and damage pair render open slots and can create a party with one click", function()
+    local c = client({ allowedRoles = 6 })
+    local group = suggestedPartial(c, 2)
+    local widgets = openUI(c)
+    local card
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "group" and widget.group == group then card = widget end
+    end
+    assert(card and card.createParty.enabled and card.createParty.shown)
+    equal(card.matched.text, "2 / 5 matched")
+    equal(card.kicker.text, "YOUR PARTIAL MATCH")
+    local open = 0
+    for slot, tile in ipairs(card.tiles) do
+        assert(tile.shown)
+        if not group.slots[slot] then
+            open = open + 1
+            assert(tile.player == nil and tile.roleIcon.desaturated)
+            equal(tile.name.text, "Needed")
+            for _, role in ipairs({ 1, 2, 4 }) do assert(not tile.roleIcons[role].shown) end
+        else
+            equal(tile.player.name, group.slots[slot].name)
+            assert(not tile.roleIcon.desaturated)
+        end
+    end
+    equal(open, 3)
+    card.tiles[1].scripts.OnEnter(card.tiles[1])
+    equal(c.tooltip.title, "Tank needed")
+    equal(#c.invites, 0)
+    card.createParty.scripts.OnClick(card.createParty)
+    equal(#c.invites, 1)
+    equal(c.invites[1], "PartialD1-TestRealm")
+end)
+test("pooled group tiles reset occupied and needed states as a match shrinks and fills", function()
+    local c = client()
+    suggestedGroup(c)
+    local widgets = openUI(c)
+    local card
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "group" and widget.shown then card = widget end
+    end
+    local count = #widgets
+    c:receive("Friend-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
+    equal(#widgets, count)
+    equal(card.matched.text, "4 / 5 matched")
+    assert(card.createParty.shown and card.createParty.enabled)
+    equal(card.tiles[2].name.text, "Needed")
+    assert(card.tiles[2].player == nil and card.tiles[2].roleIcon.desaturated)
+    for _, role in ipairs({ 1, 2, 4 }) do assert(not card.tiles[2].roleIcons[role].shown) end
+    c:receive("Friend-TestRealm", packet(3, 2, nil, c.now, c.now))
+    equal(#widgets, count)
+    equal(card.matched.text, "5 / 5 matched")
+    equal(card.tiles[2].player.name, "Friend-TestRealm")
+    assert(not card.tiles[2].roleIcon.desaturated and card.tiles[2].roleIcons[2].shown)
+    card.tiles[2].scripts.OnEnter(card.tiles[2])
+    assert(c.tooltip.title:find("Friend", 1, true))
+    equal(#c.invites, 0)
+end)
+test("partial party actions hide on All queued and return without sending invitations", function()
+    local c = client()
+    suggestedPartial(c, 2)
+    local widgets = openUI(c)
+    local party, tabs = nil, {}
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "party" and widget.shown then party = widget end
+        if widget.guildQueueKind == "tab" then tabs[widget.mode] = widget end
+    end
+    assert(party and party.enabled)
+    tabs.queue.scripts.OnClick(tabs.queue)
+    assert(not party.shown and party.group == nil)
+    tabs.groups.scripts.OnClick(tabs.groups)
+    assert(party.shown and party.enabled and #party.group.members == 2)
+    equal(#c.invites, 0)
+end)
+test("other players partial groups are visible but never offer a Create party action", function()
+    local c = client()
+    c:receive("Healer-TestRealm", packet(1, 2, nil, c.now, c.now))
+    c:receive("Damage-TestRealm", packet(1, 4, nil, c.now, c.now))
+    local widgets = openUI(c)
+    local card
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "group" and widget.shown then card = widget end
+    end
+    assert(card and card.createParty == nil)
+    equal(card.matched.text, "2 / 5 matched")
+    assert(not c.ns.CreateParty(card.group))
+    equal(#c.invites, 0)
+end)
+
 test("own suggested group renders five assigned member tiles and a click-only action", function()
     local c = client()
     local group = suggestedGroup(c)
@@ -1620,7 +1875,7 @@ test("unmatched and all-queued cards reuse widgets across repeated refreshes", f
     local c = client()
     c.ns.SetQueued(true)
     c:advance(1)
-    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    c:receive("Friend-TestRealm", packet(1, 4, { [2] = true }, c.now, c.now))
     local widgets = openUI(c)
     local cards, queueTab = {}, nil
     for _, control in ipairs(widgets) do
@@ -1791,7 +2046,7 @@ test("pooled individual and all-queued cards update icons without stale selected
     local c = client()
     c.ns.SetQueued(true)
     c:advance(1)
-    c:receive("Friend-TestRealm", packet(1, 3, nil, c.now, c.now))
+    c:receive("Friend-TestRealm", packet(1, 3, { [2] = true }, c.now, c.now))
     local widgets = openUI(c)
     local function friendCard()
         for _, card in ipairs(widgets) do
@@ -1803,7 +2058,7 @@ test("pooled individual and all-queued cards update icons without stale selected
     local card = friendCard()
     assert(card.roleIcons[1].shown and card.roleIcons[2].shown)
     assert(not card.roleIcons[4].shown)
-    c:receive("Friend-TestRealm", packet(2, 4, nil, c.now, c.now))
+    c:receive("Friend-TestRealm", packet(2, 4, { [2] = true }, c.now, c.now))
     equal(friendCard(), card)
     assert(not card.roleIcons[1].shown and not card.roleIcons[2].shown)
     assert(card.roleIcons[4].shown)

@@ -289,10 +289,10 @@ function ns.CreatePartyDisabledReason(group)
         return "This suggested group has changed. Wait for the queue to refresh."
     end
     local includesPlayer, names = false, {}
-    if #group.slots ~= 5 then
-        return "This suggested group is incomplete."
+    if type(group.members) ~= "table" or #group.members < 2 or #group.members > #ns.SLOTS then
+        return "This suggested group must contain two to five compatible players."
     end
-    for _, player in ipairs(group.slots) do
+    for _, player in ipairs(group.members) do
         local record = ns.state.records[player.name]
         if names[player.name] or not record
             or GetServerTime() - record.sentAt >= ns.TIMEOUT then
@@ -310,7 +310,7 @@ function ns.CreatePartyDisabledReason(group)
 end
 
 -- Called only by the Create party button's OnClick, never by matching or timers.
--- Submit all four requests together; the party may appear after the first request.
+-- Submit all matched targets together; a party may appear after the first request.
 function ns.CreateParty(group)
     local reason = ns.CreatePartyDisabledReason(group)
     if reason then
@@ -319,7 +319,7 @@ function ns.CreateParty(group)
         return false
     end
     local targets = {}
-    for _, player in ipairs(group.slots) do
+    for _, player in ipairs(group.members) do
         if player.name ~= ns.playerName then
             targets[#targets + 1] = player.name
         end
@@ -331,13 +331,13 @@ function ns.CreateParty(group)
             requested = requested + 1
         end
     end
-    if requested == 4 then
+    if requested == #targets then
         printMessage("Party invitations requested. Players must accept; leave the queue once grouped.")
     else
         printMessage("Some invitation requests could not be submitted. Check WoW's messages before trying again.")
     end
     ns.RefreshUI()
-    return requested == 4
+    return requested == #targets
 end
 
 function ns.SetQueued(wanted)

@@ -259,21 +259,49 @@ function ns.JoinQueueDisabledReason()
     end
 end
 
--- Used both by the disabled-button tooltip and immediately before a click action.
+-- A home party can be extended only when every existing member belongs to
+-- this suggestion. Unknown/restricted identities must never be guessed.
+local function suggestedPartyMembers(names)
+    local raid = safeCall(IsInRaid, LE_PARTY_CATEGORY_HOME)
+    if type(raid) ~= "boolean" then return "Your party status is unavailable right now." end
+    if raid then return "You cannot extend a raid with this dungeon-party action." end
+    local count = safeCall(GetNumSubgroupMembers, LE_PARTY_CATEGORY_HOME)
+    if not boundedNumber(count, 1, 4) or type(UnitFullName) ~= "function" then
+        return "Your party roster is unavailable right now. Wait for it to update."
+    end
+    local present = { [ns.playerName:lower()] = true }
+    for index = 1, count do
+        local ok, name, realm = pcall(UnitFullName, "party" .. index)
+        if not ok or secret(name, realm) or type(name) ~= "string"
+            or (realm ~= nil and type(realm) ~= "string") then
+            return "Your party roster is unavailable right now. Wait for it to update."
+        end
+        -- Match the queue's qualified-name convention, including same-realm
+        -- units and APIs that already supply a qualified first return value.
+        name = name:match("^%s*(.-)%s*$")
+        if realm and realm ~= "" and not name:find("[%s%-]") then name = name .. "-" .. realm end
+        local target = normalize(name)
+        if not target or present[target:lower()] then
+            return "Your party roster is unavailable right now. Wait for it to update."
+        end
+        if not names[target:lower()] then
+            return "Your party includes a player outside your current suggested group."
+        end
+        present[target:lower()] = true
+    end
+    return nil, present
+end
+
+-- Also returns a snapshot of missing targets and whether the party qualifies
+-- for Invite Others. Rendering and clicking use the same read-only checks.
 function ns.CreatePartyDisabledReason(group)
-    local homeGroup = IsInGroup(LE_PARTY_CATEGORY_HOME)
-    local instanceGroup = IsInGroup(LE_PARTY_CATEGORY_INSTANCE)
-    if secret(homeGroup, instanceGroup) then
+    local homeGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_HOME)
+    local instanceGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE)
+    if type(homeGroup) ~= "boolean" or type(instanceGroup) ~= "boolean" then
         return "Your party status is unavailable right now."
     end
-    if homeGroup or instanceGroup then
-        return "You are already in a party or raid. Leave your current group to create a new party."
-    end
-    if InCombatLockdown() then
-        return "You cannot create a party during combat."
-    end
-    if not C_PartyInfo or not C_PartyInfo.InviteUnit then
-        return "Party invitations are unavailable on this client."
+    if instanceGroup then
+        return "You cannot create or extend a party from an instance group."
     end
     if not ns.IsReady() then
         return "Your guild queue is not ready yet."
@@ -294,45 +322,76 @@ function ns.CreatePartyDisabledReason(group)
     end
     for _, player in ipairs(group.members) do
         local record = ns.state.records[player.name]
-        if names[player.name] or not record
+        if names[player.name:lower()] or not record
             or GetServerTime() - record.sentAt >= ns.TIMEOUT then
             return "This suggested group is no longer available. Wait for the queue to refresh."
         end
-        names[player.name] = true
+        names[player.name:lower()] = true
         includesPlayer = includesPlayer or player.name == ns.playerName
     end
     if not includesPlayer then
         return "You can only create a party for your own suggested group."
     end
-    if GetTime() - lastPartyInviteAt < 5 then
-        return "Invitations were just requested. Wait a few seconds before trying again."
+    local present = { [ns.playerName:lower()] = true }
+    if homeGroup then
+        local reason
+        reason, present = suggestedPartyMembers(names)
+        if reason then return reason end
     end
+    local targets = {}
+    for _, player in ipairs(group.members) do
+        if not present[player.name:lower()] then targets[#targets + 1] = player.name end
+    end
+    if #targets == 0 then
+        return "All suggested members are already in your party.", nil, homeGroup
+    end
+    if InCombatLockdown() then
+        return "You cannot send invitations during combat.", nil, homeGroup
+    end
+    if not C_PartyInfo or type(C_PartyInfo.InviteUnit) ~= "function" then
+        return "Party invitations are unavailable on this client.", nil, homeGroup
+    end
+    if homeGroup then
+        local full = safeCall(C_PartyInfo.IsPartyFull, LE_PARTY_CATEGORY_HOME)
+        local allowed = safeCall(C_PartyInfo.CanInvite)
+        if type(full) ~= "boolean" or type(allowed) ~= "boolean" then
+            return "Your party status is unavailable right now.", nil, true
+        end
+        if full then return "Your party is full.", nil, true end
+        if not allowed then
+            return "You do not have permission to invite players to this group.", nil, true
+        end
+    end
+    if GetTime() - lastPartyInviteAt < 5 then
+        return "Invitations were just requested. Wait a few seconds before trying again.", nil, homeGroup
+    end
+    for _, name in ipairs(targets) do
+        if GetTime() - (lastMemberInviteAt[name:lower()] or -100) < 5 then
+            return "An invitation was just requested for a suggested member. Wait a few seconds before trying again.", nil, homeGroup
+        end
+    end
+    return nil, targets, homeGroup
 end
 
--- Called only by the Create party button's OnClick, never by matching or timers.
--- Submit all matched targets together; a party may appear after the first request.
+-- Called only by the explicit group-action click, never by matching or timers.
+-- Snapshot once: a party may appear after the first request in this batch.
 function ns.CreateParty(group)
-    local reason = ns.CreatePartyDisabledReason(group)
+    local reason, targets = ns.CreatePartyDisabledReason(group)
     if reason then
         printMessage(reason)
         ns.RefreshUI()
         return false
     end
-    local targets = {}
-    for _, player in ipairs(group.members) do
-        if player.name ~= ns.playerName then
-            targets[#targets + 1] = player.name
-        end
-    end
     lastPartyInviteAt = GetTime()
     local requested = 0
     for _, name in ipairs(targets) do
+        lastMemberInviteAt[name:lower()] = GetTime()
         if pcall(C_PartyInfo.InviteUnit, name) then
             requested = requested + 1
         end
     end
     if requested == #targets then
-        printMessage("Party invitations requested. Players must accept; leave the queue once grouped.")
+        printMessage("Party invitations requested. Players must accept; leave the queue when finished forming your party.")
     else
         printMessage("Some invitation requests could not be submitted. Check WoW's messages before trying again.")
     end
@@ -351,7 +410,7 @@ function ns.SetQueued(wanted)
             ns.joinedAt = GetServerTime()
         end
         ns.queued = true
-        printMessage("Queue requested. Use Create party on your suggested group to invite its members.")
+        printMessage("Queue requested. Use Create party or Invite Others on your suggested group to invite its missing members.")
     else
         ns.queued, ns.joinedAt = false, nil
         -- Withdraw locally immediately, even if transport is currently blocked.

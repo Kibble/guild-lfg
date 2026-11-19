@@ -134,9 +134,9 @@ end
 
 local function showPartyTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Create party")
+    GameTooltip:SetText(control.actionLabel or "Create party")
     GameTooltip:AddLine(ns.CreatePartyDisabledReason(control.group)
-        or "Invite the other matched guild members. Each player must accept.",
+        or "Invite the other matched guild members who are not already in your party. Each player must accept.",
         1, 1, 1, true)
     GameTooltip:Show()
 end
@@ -444,7 +444,11 @@ local function renderGroup(group, index, own, y)
         local control = card.createParty
         if control.group ~= group then hideTooltip(control) end
         control.group = group
-        control:SetEnabled(ns.CreatePartyDisabledReason(group) == nil)
+        local reason, _, existingParty = ns.CreatePartyDisabledReason(group)
+        control.actionLabel = existingParty and "Invite Others" or "Create party"
+        control:SetText(control.actionLabel)
+        if existingParty then card.note:SetText("Invite only suggested members not already in your party.") end
+        control:SetEnabled(reason == nil)
         control:Show()
         paint(control)
     elseif card.createParty then

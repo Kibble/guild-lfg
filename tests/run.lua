@@ -92,6 +92,15 @@ test("role filtering preserves exactly the selected roles the class supports", f
     equal(ns.FilterRoles(8, 6), 0)
 end)
 
+test("common dungeon selections are a new intersection without changing either input", function()
+    local left, right = { [1] = true, [2] = true }, { [2] = true, [3] = true }
+    local shared = ns.CommonDungeons(left, right)
+    assert(shared[2] and not shared[1] and not shared[3])
+    shared[2] = nil
+    assert(left[2] and right[2])
+    assert(next(ns.CommonDungeons({}, right)) == nil)
+end)
+
 -- Versioning, leases, tombstones and membership.
 test("out of order and duplicate messages cannot change the live queue", function()
     local state = ns.State.New()
@@ -580,6 +589,100 @@ test("partial invitation failures and repeat clicks never cause automatic retrie
     assert(not c.ns.CreateParty(group))
     c:advance(20)
     equal(#c.invites, 2)
+end)
+
+test("role lists use shared dungeons and longest queue time without assigning players to groups", function()
+    local c = client({ roster = {} })
+    for _, entry in ipairs({ { "Bflex", 7, 30, 1 }, { "OldTank", 1, 200, 1 },
+        { "NewTank", 1, 10, 1 }, { "Aflex", 3, 30, 1 }, { "Hidden", 4, 300, 2 } }) do
+        c:receive(entry[1] .. "-TestRealm", packet(1, entry[2], { [entry[4]] = true }, c.now - entry[3], c.now))
+    end
+    local groups = c.ns.groups
+    c.ns.Match = function() error("Role list must not perform matchmaking") end
+    local lists = c.ns.GetRoleLists()
+    equal(#lists[1], 4)
+    equal(#lists[2], 2)
+    equal(#lists[4], 1)
+    for index, name in ipairs({ "OldTank", "Aflex", "Bflex", "NewTank" }) do
+        equal(lists[1][index].player.name, name .. "-TestRealm")
+    end
+    equal(lists[2][1].player.name, "Aflex-TestRealm")
+    equal(lists[4][1].player.name, "Bflex-TestRealm")
+    assert(lists[4][1].dungeons[1])
+    equal(c.ns.groups, groups)
+    assert(not c.ns.queued)
+    equal(#c.invites, 0)
+    c.ns.state.records["OldTank-TestRealm"].sentAt = c.now - c.ns.TIMEOUT
+    equal(#c.ns.GetRoleLists()[1], 3)
+    c.ns.prefs.dungeons = {}
+    for _, role in ipairs({ 1, 2, 4 }) do equal(#c.ns.GetRoleLists()[role], 0) end
+end)
+test("queued-player invites work across zones without joining queue or having a full match", function()
+    local c = client({ roster = {} })
+    c:receive("Remote-TestRealm", packet(1, 1, nil, c.now, c.now))
+    equal(#c.ns.groups, 0)
+    c.homeGroup = true -- A party leader can keep inviting in the manual view.
+    assert(c.ns.InviteQueuedPlayer("Remote-TestRealm"))
+    equal(#c.invites, 1)
+    equal(c.invites[1], "Remote-TestRealm")
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+    assert(not c.ns.InviteQueuedPlayer("Remote-TestRealm"))
+    c:advance(6)
+    equal(#c.invites, 1)
+end)
+test("queued-player invite guards block self unknown targets combat capacity and permission", function()
+    local c = client()
+    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    assert(not c.ns.InviteQueuedPlayer(c.ns.playerName))
+    assert(not c.ns.InviteQueuedPlayer("Unknown-TestRealm"))
+    for _, condition in ipairs({ { "combat", true }, { "partyFull", true },
+        { "canInvite", false }, { "instanceGroup", true } }) do
+        c[condition[1]] = condition[2]
+        assert(c.ns.QueueInviteDisabledReason("Friend-TestRealm"))
+        assert(not c.ns.InviteQueuedPlayer("Friend-TestRealm"))
+        c[condition[1]] = nil
+    end
+    c.env.C_PartyInfo = nil
+    assert(not c.ns.InviteQueuedPlayer("Friend-TestRealm"))
+    equal(#c.invites, 0)
+end)
+test("queued-player invites recheck freshness selected dungeons withdrawal and guild at click time", function()
+    local c = client()
+    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    assert(c.ns.QueueInviteDisabledReason("Friend-TestRealm") == nil)
+    local record = c.ns.state.records["Friend-TestRealm"]
+    record.sentAt = c.now - c.ns.TIMEOUT
+    assert(not c.ns.InviteQueuedPlayer(record.name))
+    record.sentAt = c.now
+    c.ns.prefs.dungeons = { [2] = true }
+    assert(not c.ns.InviteQueuedPlayer(record.name))
+    c.ns.prefs.dungeons = { [1] = true }
+    c:receive(record.name, { kind = "X", revision = 2, sentAt = c.now })
+    assert(not c.ns.InviteQueuedPlayer(record.name))
+    c:receive(record.name, packet(3, 4, nil, c.now, c.now))
+    c.guild = "Another Guild"
+    assert(not c.ns.InviteQueuedPlayer(record.name))
+    equal(#c.invites, 0)
+end)
+test("manual member cooldown is shared across role copies and the Quests view", function()
+    local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
+    c:advance(1)
+    c:receive("Friend-TestRealm", packet(1, 7, nil, c.now, c.now))
+    assert(c.ns.InviteQueuedPlayer("Friend-TestRealm"))
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c:advance(6)
+    assert(c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    assert(not c.ns.InviteQueuedPlayer("Friend-TestRealm"))
+    equal(#c.invites, 2)
+end)
+test("failed queued-player invitations are contained and never retried automatically", function()
+    local c, attempts = client(), 0
+    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    c.env.C_PartyInfo.InviteUnit = function() attempts = attempts + 1 error("Simulated native failure") end
+    assert(not c.ns.InviteQueuedPlayer("Friend-TestRealm"))
+    assert(not c.ns.InviteQueuedPlayer("Friend-TestRealm"))
+    c:advance(20)
+    equal(attempts, 1)
 end)
 
 test("an empty guild roster does not block queuing or guild-only synchronization", function()
@@ -1427,6 +1530,196 @@ local function openUI(c)
     equal(c.env.UISpecialFrames[1], "GuildQueueFrame")
     return widgets
 end
+
+local function roleListUI(c)
+    local widgets, views, tabs = openUI(c), {}, {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "viewSwitch" then views[control.viewMode] = control end
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+    end
+    assert(views.default.selected and not views.roles.selected)
+    views.roles.scripts.OnClick(views.roles)
+    return widgets, views, tabs
+end
+
+test("Role List switch leaves Default matching intact and shows three role columns", function()
+    local c = client()
+    suggestedGroup(c)
+    local original = c.ns.groups
+    c.ns.Match = function() error("Switching views must not rematch") end
+    local widgets, views, tabs = roleListUI(c)
+    assert(views.roles.selected and not views.default.selected)
+    assert(not tabs.groups.shown and not tabs.queue.shown)
+    local counts, toolbar = { [1] = 0, [2] = 0, [4] = 0 }
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "rolePlayer" and control.shown then
+            counts[control.role] = counts[control.role] + 1
+            assert(control.invite.shown)
+            equal(control.invite.enabled, control.player.name ~= c.ns.playerName)
+        end
+        if control.guildQueueKind == "roleToolbar" then toolbar = control end
+        if control.guildQueueKind == "group" then assert(not control.shown) end
+    end
+    assert(toolbar.shown)
+    equal(toolbar.columns[1].text, "Tank (1)")
+    equal(toolbar.columns[2].text, "Healer (1)")
+    equal(toolbar.columns[4].text, "Damage (3)")
+    equal(counts[1], 1) equal(counts[2], 1) equal(counts[4], 3)
+    equal(c.ns.groups, original)
+    views.default.scripts.OnClick(views.default)
+    assert(tabs.groups.shown and tabs.groups.selected and not toolbar.shown)
+    equal(c.ns.groups, original)
+    equal(#c.invites, 0)
+end)
+test("Role List cards duplicate selected roles filter shared dungeons and sort longest waiting first", function()
+    local c = client()
+    c:receive("Recent-TestRealm", packet(1, 7, nil, c.now - 10, c.now))
+    c:receive("Old-TestRealm", packet(1, 1, { [1] = true, [2] = true }, c.now - 200, c.now))
+    c:receive("Hidden-TestRealm", packet(1, 4, { [2] = true }, c.now - 300, c.now))
+    local widgets = roleListUI(c)
+    local rows = { [1] = {}, [2] = {}, [4] = {} }
+    for _, card in ipairs(widgets) do
+        if card.guildQueueKind == "rolePlayer" and card.shown then
+            rows[card.role][#rows[card.role] + 1] = card
+            assert(card.player.name ~= "Hidden-TestRealm")
+            equal(card.dungeons.text, c.ns.DUNGEON_BY_ID[1].name)
+            local expectedX = card.role == 1 and 0 or card.role == 2 and 246 or 492
+            equal(card.point[2], expectedX)
+            assert(card.point[2] + card:GetWidth() <= 728)
+        end
+    end
+    equal(#rows[1], 2) equal(#rows[2], 1) equal(#rows[4], 1)
+    equal(rows[1][1].player.name, "Old-TestRealm")
+    equal(rows[1][1].wait.text, "Queued 3m 20s")
+    equal(rows[1][2].player.name, "Recent-TestRealm")
+    equal(rows[2][1].player.name, "Recent-TestRealm")
+    equal(rows[4][1].player.name, "Recent-TestRealm")
+    rows[2][1].invite.scripts.OnClick(rows[2][1].invite)
+    equal(#c.invites, 1)
+    equal(c.invites[1], "Recent-TestRealm")
+    for _, role in ipairs({ 1, 2, 4 }) do
+        for _, card in ipairs(rows[role]) do
+            if card.player.name == "Recent-TestRealm" then assert(not card.invite.enabled) end
+        end
+    end
+end)
+test("Role List updates shared-dungeon filters and expiry without joining the queue", function()
+    local c = client()
+    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    local widgets = roleListUI(c)
+    local card, toolbar
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "rolePlayer" then card = widget end
+        if widget.guildQueueKind == "roleToolbar" then toolbar = widget end
+    end
+    assert(card.shown)
+    c.ns.prefs.dungeons = { [2] = true }
+    c.ns.PreferencesChanged()
+    assert(not card.shown and card.invite.memberName == nil)
+    equal(toolbar.columns[4].text, "Damage (0)")
+    c:receive("Friend-TestRealm", packet(2, 4, { [1] = true, [2] = true }, c.now, c.now))
+    assert(card.shown)
+    equal(card.dungeons.text, c.ns.DUNGEON_BY_ID[2].name)
+    c:advance(c.ns.TIMEOUT)
+    assert(not card.shown)
+    equal(toolbar.columns[4].text, "Damage (0)")
+    assert(not c.ns.queued)
+    equal(#c.invites, 0)
+end)
+test("Role List invitation buttons recheck live permissions and explain disabled states", function()
+    local c = client()
+    c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+    local widgets = roleListUI(c)
+    local invite
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "queueInvite" then invite = widget end
+    end
+    assert(invite.enabled and invite.motionWhileDisabled)
+    c.canInvite = false -- Change after rendering but before clicking.
+    invite.scripts.OnClick(invite)
+    equal(#c.invites, 0)
+    assert(not invite.enabled)
+    invite.scripts.OnEnter(invite)
+    assert(c.tooltip.text:find("permission", 1, true))
+    c.canInvite, c.partyFull = true, true
+    c:fire("GROUP_ROSTER_UPDATE")
+    assert(c.tooltip.text:find("full", 1, true))
+end)
+test("Role List pooled cards never invite a withdrawn former occupant", function()
+    local c = client()
+    c:receive("First-TestRealm", packet(1, 4, nil, c.now, c.now))
+    local widgets = roleListUI(c)
+    local card
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "rolePlayer" then card = widget end
+    end
+    card.invite.scripts.OnEnter(card.invite)
+    c:receive("First-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
+    assert(not card.shown and card.invite.memberName == nil and not c.tooltip.shown)
+    card.invite.scripts.OnClick(card.invite)
+    equal(#c.invites, 0)
+    local count = #widgets
+    c:receive("Second-TestRealm", packet(1, 4, nil, c.now, c.now))
+    equal(#widgets, count)
+    assert(card.shown)
+    equal(card.invite.memberName, "Second-TestRealm")
+    card.invite.scripts.OnClick(card.invite)
+    equal(c.invites[1], "Second-TestRealm")
+end)
+test("Role List Default and Quests retain independent scrolling and the last default subview", function()
+    local c = client()
+    for i = 1, 30 do c:receive("P" .. i .. "-TestRealm", packet(1, 4, nil, c.now, c.now)) end
+    local widgets, views, tabs = roleListUI(c)
+    local scroll
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "outputScroll" then scroll = widget end
+    end
+    scroll.scripts.OnMouseWheel(scroll, -3)
+    local rolePosition = scroll:GetVerticalScroll()
+    assert(rolePosition > 0)
+    views.default.scripts.OnClick(views.default)
+    tabs.queue.scripts.OnClick(tabs.queue)
+    scroll.scripts.OnMouseWheel(scroll, -2)
+    local defaultPosition = scroll:GetVerticalScroll()
+    assert(defaultPosition > 0)
+    views.roles.scripts.OnClick(views.roles)
+    equal(scroll:GetVerticalScroll(), rolePosition)
+    tabs.questing.scripts.OnClick(tabs.questing)
+    assert(not views.roles.shown and not views.default.shown)
+    tabs.dungeons.scripts.OnClick(tabs.dungeons)
+    assert(views.roles.selected)
+    equal(scroll:GetVerticalScroll(), rolePosition)
+    views.default.scripts.OnClick(views.default)
+    assert(tabs.queue.selected)
+    equal(scroll:GetVerticalScroll(), defaultPosition)
+    equal(#c.invites, 0)
+end)
+test("Role List text fits its cards toolbar and native view selectors", function()
+    local c = client()
+    c.ns.SetQueued(true)
+    c:advance(1)
+    c:receive("Friend-TestRealm", packet(1, 7, nil, c.now, c.now))
+    local widgets, views = roleListUI(c)
+    local function visible(control)
+        while control do
+            if not control.shown then return false end
+            control = control.parent
+        end
+        return true
+    end
+    assert(views.default.point[2] + views.default:GetWidth() < views.roles.point[2])
+    assert(views.roles.point[2] + views.roles:GetWidth() <= 1042)
+    for _, text in ipairs(widgets) do
+        if text.frameType == "FontString" and visible(text) and not text.parent.mainTab then
+            equal(text.point[1], "TOPLEFT")
+            assert(text.point[2] + text:GetWidth() <= text.parent:GetWidth(), text.text)
+            assert(-text.point[3] + text:GetHeight() <= text.parent:GetHeight(), text.text)
+        end
+    end
+    local count = #widgets
+    for _ = 1, 20 do c.ns.RefreshUI() end
+    equal(#widgets, count)
+end)
 
 test("UI header displays and refreshes the recent online-addon member count", function()
     local c = client()

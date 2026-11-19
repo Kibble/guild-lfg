@@ -75,6 +75,14 @@ function ns.RoleText(mask)
     return table.concat(names, "/")
 end
 
+function ns.CommonDungeons(left, right)
+    local shared = {}
+    for _, dungeon in ipairs(ns.DUNGEONS) do
+        if left[dungeon.id] and right[dungeon.id] then shared[dungeon.id] = true end
+    end
+    return shared
+end
+
 function ns.DungeonText(selected)
     local names = {}
     for _, dungeon in ipairs(ns.DUNGEONS) do

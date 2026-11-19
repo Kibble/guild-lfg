@@ -7,7 +7,7 @@ local presence = {}
 local registered, started = false, false
 local transportError
 local lastPartyInviteAt = -100
-local lastQuestInviteAt = {}
+local lastMemberInviteAt = {}
 local availableRoles
 ns.queued = false
 ns.state = ns.State.New()
@@ -401,7 +401,7 @@ local function applyGuildIdentity(guildName, guildRealm)
         ns.state = ns.State.New()
         pendingStateAt, pendingHello, pendingPresence = nil, key ~= nil, key ~= nil
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
-        presence, guildMembers, lastQuestInviteAt = {}, {}, {}
+        presence, guildMembers, lastMemberInviteAt = {}, {}, {}
         ns.questing = ns.Questing.New()
         questBatch, questBatchSignature, questSentSignature = nil, nil, nil
         questStopPending, localDirty = false, true
@@ -438,17 +438,28 @@ local function updateGuild(clearIfUnresolved)
     applyGuildIdentity(guildName, guildRealm)
 end
 
--- Read-only eligibility for the same-zone card button and its hover tooltip.
-function ns.QuestInviteDisabledReason(name)
-    if not ns.IsReady() then return "Your guild information is not ready yet." end
-    local target = normalize(name)
-    if not target or target:lower() == ns.playerName:lower() then
-        return "Select another guild member to invite."
+-- Role lists read the queue directly, never the matcher's assigned groups.
+-- Ascending joinedAt means descending time spent waiting (longest first).
+function ns.GetRoleLists()
+    local lists = { [1] = {}, [2] = {}, [4] = {} }
+    if not ns.IsReady() then return lists end
+    local now = GetServerTime()
+    for _, player in ipairs(ns.state:Sorted()) do
+        local shared = ns.CommonDungeons(player.dungeons, ns.prefs.dungeons)
+        if now - player.sentAt < ns.TIMEOUT and next(shared) then
+            for _, role in ipairs({ 1, 2, 4 }) do
+                if ns.HasRole(player.roles, role) then
+                    local column = lists[role]
+                    column[#column + 1] = { player = player, dungeons = shared }
+                end
+            end
+        end
     end
-    local member = guildMembers[target:lower()]
-    if not member or localZoneName == "" or member.area ~= localZoneName then
-        return "The guild roster cannot confirm this member is online in your zone. Try refreshing the Guild window."
-    end
+    return lists
+end
+
+-- Shared native-party restrictions and per-person cooldown across both views.
+local function memberInviteDisabledReason(target)
     if InCombatLockdown() then return "You cannot send invitations during combat." end
     if not C_PartyInfo or type(C_PartyInfo.InviteUnit) ~= "function"
         or type(C_PartyInfo.CanInvite) ~= "function" or type(C_PartyInfo.IsPartyFull) ~= "function" then
@@ -463,10 +474,61 @@ function ns.QuestInviteDisabledReason(name)
     if instanceGroup then return "You cannot send these invitations from an instance group." end
     if full then return "Your party or raid is full." end
     if not allowed then return "You do not have permission to invite players to this group." end
-    if GetTime() - (lastQuestInviteAt[target:lower()] or -100) < 5 then
+    if GetTime() - (lastMemberInviteAt[target:lower()] or -100) < 5 then
         return "An invitation was just requested for this member. Wait a few seconds before trying again."
     end
-    return nil, member.name
+end
+
+-- Read-only eligibility for the same-zone card button and its hover tooltip.
+function ns.QuestInviteDisabledReason(name)
+    if not ns.IsReady() then return "Your guild information is not ready yet." end
+    local target = normalize(name)
+    if not target or target:lower() == ns.playerName:lower() then
+        return "Select another guild member to invite."
+    end
+    local member = guildMembers[target:lower()]
+    if not member or localZoneName == "" or member.area ~= localZoneName then
+        return "The guild roster cannot confirm this member is online in your zone. Try refreshing the Guild window."
+    end
+    return memberInviteDisabledReason(target), member.name
+end
+
+function ns.QueueInviteDisabledReason(name)
+    if not ns.IsReady() then return "Your guild information is not ready yet." end
+    local target = normalize(name)
+    if not target or target:lower() == ns.playerName:lower() then
+        return "Select another guild member to invite."
+    end
+    local player = ns.state.records[target]
+    if not player or GetServerTime() - player.sentAt >= ns.TIMEOUT then
+        return "This player is no longer queued. Wait for the queue to refresh."
+    end
+    if not next(ns.CommonDungeons(player.dungeons, ns.prefs.dungeons)) then
+        return "You do not share a selected dungeon with this player."
+    end
+    return memberInviteDisabledReason(target), player.name
+end
+
+-- Called only after the explicit click has revalidated its target.
+local function requestMemberInvite(target)
+    lastMemberInviteAt[target:lower()] = GetTime()
+    local requested = pcall(C_PartyInfo.InviteUnit, target)
+    printMessage(requested and "Party invitation requested. The player must accept."
+        or "The invitation request could not be submitted. Check WoW's messages before trying again.")
+    ns.RefreshUI()
+    return requested
+end
+
+-- Role-list invitations have no same-zone or complete-group requirement.
+function ns.InviteQueuedPlayer(name)
+    updateGuild()
+    local reason, target = ns.QueueInviteDisabledReason(name)
+    if reason then
+        printMessage(reason)
+        ns.RefreshUI()
+        return false
+    end
+    return requestMemberInvite(target)
 end
 
 -- Only the explicit Invite click calls this. Never retry from timers or messages.
@@ -480,12 +542,7 @@ function ns.InviteQuestingPlayer(name)
         ns.RefreshUI()
         return false
     end
-    lastQuestInviteAt[target:lower()] = GetTime()
-    local requested = pcall(C_PartyInfo.InviteUnit, target)
-    printMessage(requested and "Party invitation requested. The player must accept."
-        or "The invitation request could not be submitted. Check WoW's messages before trying again.")
-    ns.RefreshUI()
-    return requested
+    return requestMemberInvite(target)
 end
 
 local function send(message)

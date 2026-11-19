@@ -1,13 +1,16 @@
 local _, ns = ...
 local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, dungeonTab, questTab
-local sidebar, queueViewStatus
+local sidebar, queueViewStatus, defaultView, roleView, roleToolbar, roleTitle
 local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
 local expandedQuests = {}
 local roleChecks, dungeonChecks, counters = {}, {}, {}
 local mode, dungeonMode, hovered, pendingScroll = "groups", "groups", nil, nil
-local scrollPositions = { groups = 0, queue = 0, questing = 0 }
-local pools = { groups = {}, people = {}, headings = {}, empty = {}, questing = {} }
+local defaultMode = "groups"
+local scrollPositions = { groups = 0, queue = 0, roles = 0, questing = 0 }
+local pools = { groups = {}, people = {}, headings = {}, empty = {}, questing = {},
+    rolePeople = {}, roleEmpty = {} }
 local CONTENT_WIDTH, QUEST_WIDTH, QUEST_TOOLBAR_HEIGHT = 728, 1006, 136
+local ROLE_COLUMN_WIDTH, ROLE_ROW_HEIGHT = 234, 124
 local C = {
     background = { 0.025, 0.025, 0.025 }, panel = { 0.035, 0.035, 0.035 },
     card = { 0.045, 0.045, 0.045 }, tile = { 0.025, 0.025, 0.025 },
@@ -138,6 +141,14 @@ local function showPartyTooltip(control)
     GameTooltip:Show()
 end
 
+local function showQueueInviteTooltip(control)
+    GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Invite")
+    GameTooltip:AddLine(ns.QueueInviteDisabledReason(control.memberName)
+        or "Invite this queued player to your party. They must accept.", 1, 1, 1, true)
+    GameTooltip:Show()
+end
+
 local function showQuestInviteTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
     GameTooltip:SetText("Invite")
@@ -159,7 +170,7 @@ local function paint(control)
     -- Native templates own their hover, pressed, checked and disabled artwork.
     if control.guildQueueKind == "scrollbar" then
         surface(control, C.background)
-    elseif control.guildQueueKind == "tab" then
+    elseif control.guildQueueKind == "tab" or control.guildQueueKind == "viewSwitch" then
         if control.mainTab then
             if control.selected then PanelTemplates_SelectTab(control) else PanelTemplates_DeselectTab(control) end
             return -- Native visibility/color changes; both states share fixed geometry.
@@ -498,6 +509,63 @@ local function renderPeople(players, y)
     return y + math.ceil(#players / 2) * 100
 end
 
+local function newRolePersonCard()
+    local card = panel(outputScroll.content, 0, 0, ROLE_COLUMN_WIDTH, 112, C.card)
+    card.guildQueueKind = "rolePlayer"
+    card.name = label(card, "", 10, 6, ROLE_COLUMN_WIDTH - 20, 20, "GameFontNormal", C.text)
+    card.wait = label(card, "", 10, 30, ROLE_COLUMN_WIDTH - 20, 16, nil, C.muted)
+    card.dungeons = label(card, "", 10, 49, ROLE_COLUMN_WIDTH - 20, 26, nil, C.muted, true)
+    card.invite = button(card, "Invite", 10, 82, ROLE_COLUMN_WIDTH - 20, 24, function(self)
+        ns.InviteQueuedPlayer(self.memberName)
+    end, "queueInvite")
+    card.invite:SetMotionScriptsWhileDisabled(true)
+    card.invite.tooltip = showQueueInviteTooltip
+    bindHover(card, showTextTooltip)
+    return card
+end
+
+local function newRoleEmpty()
+    local card = panel(outputScroll.content, 0, 0, ROLE_COLUMN_WIDTH, 72, C.card)
+    card.message = label(card, "No compatible players queued for this role.", 10, 10,
+        ROLE_COLUMN_WIDTH - 20, 52, nil, C.muted, true)
+    return card
+end
+
+local function renderRoleList()
+    local lists, now, height = ns.GetRoleLists(), GetServerTime(), 136
+    roleToolbar.hint:SetText(next(ns.prefs.dungeons)
+        and "Longest waiting first. Multi-role players appear in each selected role."
+        or "Select dungeons on the left to see players with shared selections.")
+    for index, role in ipairs({ 1, 2, 4 }) do
+        local column, x = lists[role], (index - 1) * (ROLE_COLUMN_WIDTH + 12)
+        roleToolbar.columns[role]:SetText(ns.ROLE_NAMES[role] .. " (" .. #column .. ")")
+        if #column == 0 then
+            local empty = acquire(pools.roleEmpty, newRoleEmpty)
+            place(empty, x, 64, ROLE_COLUMN_WIDTH, 72)
+        end
+        for row, entry in ipairs(column) do
+            local player = entry.player
+            local card = acquire(pools.rolePeople, newRolePersonCard)
+            place(card, x, 64 + (row - 1) * ROLE_ROW_HEIGHT, ROLE_COLUMN_WIDTH, 112)
+            card.role = role
+            card.name:SetText(displayName(player))
+            colorText(card.name, player.name == ns.playerName and C.green or C.text)
+            local seconds = math.max(0, now - player.joinedAt)
+            card.wait:SetText(string.format("Queued %dm %02ds", math.floor(seconds / 60), seconds % 60))
+            card.dungeons:SetText(ns.SafeText(ns.DungeonText(entry.dungeons)))
+            surface(card, player.name == ns.playerName and C.own or C.card)
+            playerTooltip(card, player)
+            card.tooltipText = card.tooltipText .. "\nShared dungeons: " .. ns.SafeText(ns.DungeonText(entry.dungeons))
+            if card.invite.memberName ~= player.name then hideTooltip(card.invite) end
+            card.invite.memberName = player.name
+            card.invite:SetEnabled(ns.QueueInviteDisabledReason(player.name) == nil)
+            paint(card.invite)
+        end
+        height = math.max(height, 64 + #column * ROLE_ROW_HEIGHT)
+    end
+    return height
+end
+
 local function newQuestCard()
     local card = panel(outputScroll.content, 0, 0, QUEST_WIDTH, 78, C.card)
     card.guildQueueKind, card.lines = "questMember", {}
@@ -577,9 +645,12 @@ end
 local function renderOutput(players)
     for _, pool in pairs(pools) do pool.used = 0 end
     questToolbar:SetShown(mode == "questing")
+    roleToolbar:SetShown(mode == "roles")
     local y = 0
     if mode == "questing" then
         y = renderQuesting()
+    elseif mode == "roles" then
+        y = renderRoleList()
     elseif mode == "groups" then
         local ownIndex
         for index, group in ipairs(ns.groups) do
@@ -625,6 +696,10 @@ local function renderOutput(players)
                 control.createParty:Hide()
                 control.createParty.group = nil
             end
+            if control.guildQueueKind == "rolePlayer" then
+                hideTooltip(control.invite)
+                control.invite.memberName = nil
+            end
             control:Hide()
         end
     end
@@ -640,9 +715,13 @@ function ns.RefreshUI()
     if not frame or not frame:IsShown() then return end
     local questing = mode == "questing"
     sidebar:SetShown(not questing)
-    groupsTab:SetShown(not questing)
-    queueTab:SetShown(not questing)
+    groupsTab:SetShown(not questing and mode ~= "roles")
+    queueTab:SetShown(not questing and mode ~= "roles")
+    roleTitle:SetShown(mode == "roles")
+    defaultView:SetShown(not questing)
+    roleView:SetShown(not questing)
     queueViewStatus:SetShown(not questing)
+    queueViewStatus:SetText(mode == "roles" and "Shared dungeons" or "Live guild queue")
     if questing then
         outputScroll.layout(18, 112, 1024, 574)
     else
@@ -683,6 +762,9 @@ function ns.RefreshUI()
     queueTab:SetText("All queued (" .. #players .. ")")
     paint(groupsTab)
     paint(queueTab)
+    defaultView.selected, roleView.selected = mode ~= "roles", mode == "roles"
+    paint(defaultView)
+    paint(roleView)
     paint(dungeonTab)
     paint(questTab)
     renderOutput(players)
@@ -697,6 +779,7 @@ local function switchTab(nextMode)
         if mode ~= "questing" then dungeonMode = mode end
         mode = nextMode
         if mode ~= "questing" then dungeonMode = mode end
+        if mode == "groups" or mode == "queue" then defaultMode = mode end
         pendingScroll = scrollPositions[mode]
     end
     ns.RefreshUI()
@@ -806,9 +889,28 @@ local function createUI()
     queueTab.mode = "queue"
     dungeonTab = bottomTab(frame, "Dungeons", nil, function() switchTab("dungeons") end, "dungeons")
     questTab = bottomTab(frame, "Quests", dungeonTab, function() switchTab("questing") end, "questing")
-    queueViewStatus = label(frame, "Live guild queue", 864, 119, 178, 18, nil, C.green)
+    roleTitle = label(frame, "Role List", 296, 116, 380, 24, "GameFontNormalLarge", C.heading)
+    queueViewStatus = label(frame, "Live guild queue", 690, 119, 126, 18, nil, C.green)
     queueViewStatus:SetJustifyH("RIGHT")
+    defaultView = button(frame, "Default", 826, 112, 96, 32,
+        function() switchTab(defaultMode) end, "viewSwitch")
+    defaultView.viewMode = "default"
+    roleView = button(frame, "Role List", 930, 112, 112, 32,
+        function() switchTab("roles") end, "viewSwitch")
+    roleView.viewMode = "roles"
     outputScroll = scrollArea(frame, 296, 156, 746, 530, "outputScroll")
+    roleToolbar = CreateFrame("Frame", nil, outputScroll.content)
+    roleToolbar.guildQueueKind = "roleToolbar"
+    place(roleToolbar, 0, 0, CONTENT_WIDTH, 56)
+    roleToolbar.hint = label(roleToolbar, "", 2, 0, CONTENT_WIDTH - 4, 18, nil, C.muted)
+    roleToolbar.columns = {}
+    for index, role in ipairs({ 1, 2, 4 }) do
+        local x = (index - 1) * (ROLE_COLUMN_WIDTH + 12)
+        roleIcon(roleToolbar, role, x + 8, 28, 20)
+        roleToolbar.columns[role] = label(roleToolbar, "", x + 36, 26,
+            ROLE_COLUMN_WIDTH - 44, 24, "GameFontNormal", C.heading)
+    end
+    roleToolbar:Hide()
     questToolbar = CreateFrame("Frame", nil, outputScroll.content)
     place(questToolbar, 0, 0, QUEST_WIDTH, QUEST_TOOLBAR_HEIGHT)
     label(questToolbar, "Guild members in your zone", 2, 0, QUEST_WIDTH - 4, 30, "GameFontNormalLarge", C.heading)

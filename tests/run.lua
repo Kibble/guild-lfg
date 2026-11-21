@@ -695,7 +695,7 @@ test("formation announcement disables peer actions before the first native invit
     assert(not b.ns.InviteQuestingPlayer("Charlie-TestRealm"))
     equal(#b.invites, 0)
     local status = b.ns.FormationStatus(b.ns.groups[1])
-    equal(status.owner, a.ns.playerName) equal(status.remaining, 30) assert(not status.isOwner)
+    equal(status.owner, a.ns.playerName) equal(status.remaining, 10) assert(not status.isOwner)
     equal(b.ns.FormationStatus("Charlie-TestRealm").key, status.key)
     equal(b.ns.state.records[a.ns.playerName].roles, 1)
 end)
@@ -724,12 +724,16 @@ test("formation expiry reenables peers without renewing on duplicate announcemen
     advanceFormations(clients, 6)
     assert(a.ns.CreateParty(a.ns.groups[1])) -- Owner may retry under native guards/cooldowns.
     equal(lastFormation(a, "F").claimID, start.claimID)
-    advanceFormations(clients, 15)
+    advanceFormations(clients, 2)
     b:receive(a.ns.playerName, start)
-    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 9)
-    advanceFormations(clients, 9)
+    b:receive(a.ns.playerName, packet(start.claimID + 1, 1, { [1] = true }, a.ns.joinedAt, b.now))
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 2)
+    advanceFormations(clients, 1)
+    assert(b.ns.CreatePartyDisabledReason(b.ns.groups[1])) -- Still blocked at nine seconds.
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 1)
+    advanceFormations(clients, 1)
     equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
-    assert(b.ns.CreatePartyDisabledReason(b.ns.groups[1]) == nil)
+    assert(b.ns.CreatePartyDisabledReason(b.ns.groups[1]) == nil) -- Available at exactly ten seconds.
     equal(#b.invites, 0)
 end)
 test("new tokens from an already active inviter cannot renew the invitation window", function()
@@ -739,10 +743,10 @@ test("new tokens from an already active inviter cannot renew the invitation wind
     b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 100, matchupKey = key })
     advanceFormations(clients, 4)
     b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 101, matchupKey = key })
-    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 26)
-    advanceFormations(clients, 26)
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 6)
+    advanceFormations(clients, 6)
     equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
-    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now - 26, claimID = 101, matchupKey = key })
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now - 6, claimID = 101, matchupKey = key })
     equal(b.ns.FormationStatus(b.ns.groups[1]), nil) -- Expiry alone never promotes a held start.
 end)
 
@@ -766,7 +770,7 @@ test("match announcements require a fresh participant exact fingerprint and the 
     b:receive("Outsider-TestRealm", p)
     b:receive(a.ns.playerName, p, "WHISPER")
     b:receive(a.ns.playerName, p, "GUILD", "OtherAddon")
-    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now - 30, claimID = 10, matchupKey = key })
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now - b.ns.FORMATION_TIMEOUT, claimID = 10, matchupKey = key })
     b:receive(a.ns.playerName, { kind = "F", sentAt = b.now + 6, claimID = 10, matchupKey = key })
     b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 10, matchupKey = "0123456789abcdef" })
     equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
@@ -889,15 +893,15 @@ test("a successful retry stays protected even when the first release is lost nea
     local first = lastFormation(a, "F")
     b:receive(a.ns.playerName, first)
     a.locked = true
-    advanceFormations(clients, 28)
+    advanceFormations(clients, 8)
     a.locked = false
     assert(a.ns.InviteQueuedPlayer("Charlie-TestRealm", 4))
     local second = lastFormation(a, "F")
     equal(second.replacesID, first.claimID)
     b:receive(a.ns.playerName, second) -- Do not deliver the old release at all.
-    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 30)
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 10)
     b:advance(3)
-    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 27)
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 7)
     b:receive(a.ns.playerName, { kind = "U", sentAt = b.now, claimID = first.claimID, matchupKey = first.matchupKey })
     assert(b.ns.FormationStatus(b.ns.groups[1]))
     equal(#a.invites, 1) equal(#b.invites, 0)
@@ -907,10 +911,10 @@ test("nonoverlapping fresh windows tolerate peer clock skew without treating a n
     local a, b = clients[1], clients[2]
     local key, started = b.ns.MatchupKey(b.ns.groups[1]), b.now
     b:receive(a.ns.playerName, { kind = "F", sentAt = started, claimID = 100, matchupKey = key })
-    a:advance(30)
-    b:advance(25)
+    a:advance(10)
+    b:advance(5)
     b:receive(a.ns.playerName, { kind = "F", sentAt = a.now, claimID = 101, matchupKey = key })
-    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 35) -- Five-second accepted clock tolerance.
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 15) -- Five-second accepted clock tolerance.
     b:advance(6)
     assert(b.ns.FormationStatus(b.ns.groups[1]))
     equal(#a.invites, 0) equal(#b.invites, 0)
@@ -983,7 +987,7 @@ test("simultaneous clicks converge deterministically without pretending to undo 
     equal(b.ns.FormationStatus(b.ns.groups[1]).owner, a.ns.playerName)
     equal(#a.invites, 1) equal(#b.invites, 1)
     assert(not b.ns.CreateParty(b.ns.groups[1]))
-    advanceFormations(clients, 31)
+    advanceFormations(clients, 11)
     equal(#a.invites, 1) equal(#b.invites, 1)
 end)
 
@@ -2568,7 +2572,7 @@ test("formation receipt updates group and role-list buttons immediately and expi
     assert(not action.enabled)
     equal(action.text, "Forming...")
     assert(card.note.text:find("Alpha", 1, true))
-    assert(b.tooltip.text:find("30s", 1, true))
+    assert(b.tooltip.text:find("10s", 1, true))
     action.scripts.OnClick(action)
     equal(#b.invites, 0)
     views.roles.scripts.OnClick(views.roles)
@@ -2580,7 +2584,7 @@ test("formation receipt updates group and role-list buttons immediately and expi
     equal(recruit.invite.text, "Forming...")
     recruit.invite.scripts.OnEnter(recruit.invite)
     assert(b.tooltip.text:find("Alpha", 1, true))
-    advanceFormations(clients, 30)
+    advanceFormations(clients, 10)
     assert(recruit.invite.enabled)
     equal(recruit.invite.text, "Invite as Damage")
     views.default.scripts.OnClick(views.default)
@@ -2893,6 +2897,31 @@ test("UI opens and its multi-select controls drive the real queue", function()
     queueTab.scripts.OnClick(queueTab)
     join.scripts.OnClick(join)
     assert(not c.ns.queued)
+end)
+
+test("dungeon controls omit Clear while Leave queue preserves selections and Select all still works", function()
+    local c = client({ saved = { roles = 2, dungeons = { [1] = true, [2] = true } } })
+    local widgets, join, selectAll = openUI(c)
+    for _, control in ipairs(widgets) do
+        assert(control.guildQueueKind ~= "clear" and control.text ~= "Clear")
+        if control.guildQueueKind == "queue" then join = control end
+        if control.guildQueueKind == "selectAll" then selectAll = control end
+    end
+    assert(join and selectAll)
+    equal(selectAll:GetWidth(), join:GetWidth())
+    local roles, dungeons = c.ns.prefs.roles, c.ns.Protocol.DungeonList(c.ns.prefs.dungeons)
+    join.scripts.OnClick(join)
+    c:advance(1)
+    assert(c.ns.queued)
+    equal(join.text, "Leave queue")
+    join.scripts.OnClick(join)
+    assert(not c.ns.queued)
+    equal(c.ns.prefs.roles, roles)
+    equal(c.ns.Protocol.DungeonList(c.ns.prefs.dungeons), dungeons)
+    selectAll.scripts.OnClick(selectAll)
+    for _, dungeon in ipairs(c.ns.DUNGEONS) do assert(c.ns.prefs.dungeons[dungeon.id]) end
+    assert(not c.ns.queued)
+    equal(#c.invites, 0)
 end)
 
 test("Create party button is hoverable when disabled and tracks party changes", function()

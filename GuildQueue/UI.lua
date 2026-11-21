@@ -897,14 +897,10 @@ local function createUI()
     end
     dungeonScroll.update()
     label(sidebar, "Ranges are recommended levels", 14, 439, 230, 16, nil, C.muted)
-    button(sidebar, "Select all", 14, 464, 111, 28, function()
+    button(sidebar, "Select all", 14, 464, 232, 28, function()
         for _, dungeon in ipairs(ns.DUNGEONS) do ns.prefs.dungeons[dungeon.id] = true end
         ns.PreferencesChanged()
     end, "selectAll")
-    button(sidebar, "Clear", 135, 464, 111, 28, function()
-        ns.prefs.dungeons = {}
-        ns.PreferencesChanged()
-    end, "clear")
     joinButton = button(sidebar, "Join queue", 14, 506, 232, 34, function()
         ns.SetQueued(not ns.queued)
     end, "queue")

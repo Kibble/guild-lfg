@@ -1,5 +1,5 @@
 local addonName, ns = ...
-local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, dungeonTab, questTab
+local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, dungeonTab, questTab, minimapButton
 local sidebar, queueViewStatus, defaultView, roleView, roleToolbar, roleTitle
 local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
 local expandedQuests = {}
@@ -959,6 +959,85 @@ local function createUI()
     end)
     frame:SetScript("OnHide", clearHover)
     frame:Hide()
+end
+
+function ns.InitializeMinimap()
+    if minimapButton then return minimapButton end
+    if not Minimap or not ns.prefs then return end
+    local angle = ns.prefs.minimapAngle
+    if type(angle) ~= "number" or angle ~= angle or angle < 0 or angle >= 360 then angle = 225 end
+    ns.prefs.minimapAngle = angle
+    local dragging, wasDragged = false, false
+    local control = CreateFrame("Button", "GuildQueueMinimapButton", Minimap)
+    minimapButton = control
+    control:SetSize(31, 31)
+    control:EnableMouse(true)
+    control:SetMovable(true)
+    control:SetFrameStrata("MEDIUM")
+    control:SetFrameLevel(Minimap:GetFrameLevel() + 8)
+    control:RegisterForClicks("LeftButtonUp")
+    control:RegisterForDrag("LeftButton")
+    control:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    local icon = control:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(20, 20)
+    icon:SetPoint("CENTER", control, "CENTER", 0, 1)
+    icon:SetTexture("Interface\\Icons\\INV_Misc_GroupLooking")
+    icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+    local border = control:CreateTexture(nil, "OVERLAY")
+    border:SetSize(53, 53)
+    border:SetPoint("TOPLEFT", control, "TOPLEFT")
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    control.tooltipTitle = "Guild Queue"
+    control.tooltipText = "Left-click to toggle Guild Queue. Drag to move around the minimap."
+    local function position()
+        local radians = math.rad(angle)
+        control:ClearAllPoints()
+        control:SetPoint("CENTER", Minimap, "CENTER", math.cos(radians) * (Minimap:GetWidth() / 2 + 8),
+            math.sin(radians) * (Minimap:GetHeight() / 2 + 8))
+    end
+    local function drag()
+        local centerX, centerY = Minimap:GetCenter()
+        local scale = Minimap:GetEffectiveScale()
+        if not centerX or not centerY or not scale or scale <= 0 then return end
+        local x, y = GetCursorPosition()
+        x, y = x / scale - centerX, y / scale - centerY
+        if x == 0 and y == 0 then return end
+        angle = math.deg(math.atan2(y, x)) % 360
+        ns.prefs.minimapAngle = angle
+        position()
+    end
+    local function stopDragging()
+        dragging = false
+        control:SetScript("OnUpdate", nil)
+        hideTooltip(control)
+    end
+    control:SetScript("OnMouseDown", function(_, button)
+        if button == "LeftButton" then wasDragged = false end
+    end)
+    control:SetScript("OnDragStart", function(self)
+        dragging, wasDragged = true, true
+        hideTooltip(self)
+        self:SetScript("OnUpdate", drag)
+        drag()
+    end)
+    control:SetScript("OnDragStop", stopDragging)
+    control:SetScript("OnHide", stopDragging)
+    control:SetScript("OnClick", function(self, button)
+        if button == "LeftButton" and not dragging and not wasDragged then
+            hideTooltip(self)
+            ns.ToggleUI()
+        end
+    end)
+    control:SetScript("OnEnter", function(self)
+        if dragging then return end
+        clearHover()
+        hovered = self
+        showTextTooltip(self)
+    end)
+    control:SetScript("OnLeave", hideTooltip)
+    Minimap:HookScript("OnSizeChanged", position)
+    position()
+    return control
 end
 
 function ns.ToggleUI()

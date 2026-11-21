@@ -1308,12 +1308,13 @@ local function start()
         return
     end
     started = true
+    ns.InitializeMinimap()
     identifyPlayer()
     updateGuild()
     scanLocalQuests()
     scanGuildMembers()
     ns.ticker = C_Timer.NewTicker(1, tick)
-    printMessage("Loaded. Use /gq to open the guild dungeon queue.")
+    printMessage("Loaded. Click the minimap icon or use /gq to open Guild Queue.")
 end
 
 events:SetScript("OnEvent", function(_, event, ...)

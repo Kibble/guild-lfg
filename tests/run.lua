@@ -469,6 +469,7 @@ local function client(options)
     c.ns, c.env = pure(), env
     c.ns.RefreshUI = function() end
     c.ns.ToggleUI = function() c.toggled = true end
+    c.ns.InitializeMinimap = function() c.minimapStarts = (c.minimapStarts or 0) + 1 end
     env.GuildQueueDB = options.saved or { roles = 4, dungeons = { [1] = true } }
     env.GetTime = function() return c.clock end
     env.GetServerTime = function() return c.now end
@@ -2170,7 +2171,7 @@ test("corrupt saved preferences are sanitized", function()
     assert(c.ns.prefs.dungeons[1])
     equal(c.ns.prefs.shareQuests, false)
 end)
-local function openUI(c)
+local function openUI(c, keepClosed)
     local widgets, methods = {}, {}
     local function widget(template, kind, parent, name)
         local object = setmetatable({ template = template, frameType = kind, parent = parent,
@@ -2181,7 +2182,9 @@ local function openUI(c)
     end
     function methods:SetSize(width, height)
         assert(width >= 0 and height >= 0, "widget dimensions must be non-negative")
+        local changed = self.width ~= width or self.height ~= height
         self.width, self.height = width, height
+        if changed and self.scripts.OnSizeChanged then self.scripts.OnSizeChanged(self, width, height) end
     end
     function methods:SetWidth(width)
         assert(width >= 0, "widget width must be non-negative")
@@ -2208,6 +2211,16 @@ local function openUI(c)
     function methods:SetColorTexture(...) self.color = { ... } end
     function methods:SetTextColor(...) self.textColor = { ... } end
     function methods:SetTexture(path) self.texture = path end
+    function methods:SetTexCoord(...) self.texCoord = { ... } end
+    function methods:SetHighlightTexture(path)
+        self.highlightTexture = self:CreateTexture(nil, "HIGHLIGHT")
+        self.highlightTexture:SetTexture(path)
+    end
+    function methods:RegisterForClicks(...) self.clickButtons = { ... } end
+    function methods:RegisterForDrag(...) self.dragButtons = { ... } end
+    function methods:GetCenter() return self.centerX or 200, self.centerY or 200 end
+    function methods:GetFrameLevel() return self.frameLevel or 0 end
+    function methods:SetFrameLevel(level) self.frameLevel = level end
     function methods:SetAtlas(atlas, useAtlasSize)
         self.atlas = atlas
         if useAtlasSize then
@@ -2232,6 +2245,13 @@ local function openUI(c)
     function methods:GetTop() return 1080 end
     function methods:GetEffectiveScale() return self.scale or 1 end
     function methods:SetScript(name, callback) self.scripts[name] = callback end
+    function methods:HookScript(name, callback)
+        local original = self.scripts[name]
+        self.scripts[name] = function(...)
+            if original then original(...) end
+            callback(...)
+        end
+    end
     function methods:SetChecked(value) self.checked = value end
     function methods:GetChecked() return self.checked end
     function methods:SetEnabled(value) self.enabled = value end
@@ -2252,7 +2272,7 @@ local function openUI(c)
     function methods:GetVerticalScroll() return self.scroll end
     for _, name in ipairs({ "SetJustifyH", "SetJustifyV", "SetSpacing",
         "SetFrameStrata", "SetClampedToScreen", "SetMovable", "EnableMouse", "EnableMouseWheel",
-        "SetWordWrap", "SetNonSpaceWrap", "RegisterForDrag", "SetScrollChild", "StartMoving",
+        "SetWordWrap", "SetNonSpaceWrap", "SetScrollChild", "StartMoving",
         "StopMovingOrSizing" }) do
         methods[name] = function() end
     end
@@ -2267,6 +2287,8 @@ local function openUI(c)
     }
     c.env.UIParent, c.env.UISpecialFrames = widget(nil, "Frame", nil, "UIParent"), {}
     c.env.UIParent:SetSize(1920, 1080)
+    c.env.Minimap = widget(nil, "Minimap", c.env.UIParent, "Minimap")
+    c.env.Minimap:SetSize(160, 160)
     c.env.GetCursorPosition = function() return 0, 0 end
     c.env.CreateFrame = function(kind, name, parent, template)
         local control = widget(template, kind, parent, name)
@@ -2319,10 +2341,147 @@ local function openUI(c)
     local ui = assert(loadfile("GuildQueue/UI.lua"))
     setfenv(ui, c.env)
     ui("GuildQueue", c.ns)
-    c.ns.ToggleUI()
-    equal(c.env.UISpecialFrames[1], "GuildQueueFrame")
+    c.ns.InitializeMinimap()
+    if not keepClosed then
+        c.ns.ToggleUI()
+        equal(c.env.UISpecialFrames[1], "GuildQueueFrame")
+    end
     return widgets
 end
+
+test("startup initializes the minimap launcher once without requiring guild membership or opening the window", function()
+    local c = client({ noGuild = true })
+    equal(c.minimapStarts, 1)
+    c:fire("PLAYER_ENTERING_WORLD")
+    c:fire("PLAYER_LOGIN")
+    equal(c.minimapStarts, 1)
+    assert(not c.toggled and not c.ns.queued)
+    equal(#c.invites, 0)
+end)
+test("minimap launcher is a single native button created without opening the main window", function()
+    local c = client()
+    local widgets = openUI(c, true)
+    local launcher, count = c.ns.InitializeMinimap(), #widgets
+    equal(launcher.frameName, "GuildQueueMinimapButton")
+    equal(launcher.parent, c.env.Minimap)
+    equal(launcher:GetWidth(), 31) equal(launcher:GetHeight(), 31)
+    equal(launcher.clickButtons[1], "LeftButtonUp")
+    equal(launcher.dragButtons[1], "LeftButton")
+    assert(launcher:GetFrameLevel() > c.env.Minimap:GetFrameLevel())
+    equal(c.ns.prefs.minimapAngle, 225)
+    equal(launcher.scripts.OnUpdate, nil)
+    for _, control in ipairs(widgets) do assert(control.frameName ~= "GuildQueueFrame") end
+    equal(c.ns.InitializeMinimap(), launcher)
+    equal(#widgets, count)
+end)
+test("minimap left clicks toggle the same main window without joining sending messages or inviting", function()
+    local c = client({ noGuild = true })
+    c.locked = true
+    local widgets = openUI(c, true)
+    local launcher = c.ns.InitializeMinimap()
+    launcher.scripts.OnClick(launcher, "LeftButton")
+    local main
+    for _, control in ipairs(widgets) do if control.frameName == "GuildQueueFrame" then main = control end end
+    assert(main and main:IsShown())
+    local count = #widgets
+    launcher.scripts.OnClick(launcher, "RightButton")
+    assert(main:IsShown())
+    launcher.scripts.OnClick(launcher, "LeftButton")
+    assert(not main:IsShown())
+    launcher.scripts.OnClick(launcher, "LeftButton")
+    assert(main:IsShown())
+    equal(#widgets, count)
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("minimap dragging uses scaled cursor coordinates and never treats drag release as a click", function()
+    local c = client()
+    local widgets = openUI(c, true)
+    local launcher = c.ns.InitializeMinimap()
+    c.env.Minimap:SetScale(2)
+    local x, y = 400, 600 -- Minimap center is (200, 200) in its own coordinates.
+    c.env.GetCursorPosition = function() return x, y end
+    launcher.scripts.OnMouseDown(launcher, "LeftButton")
+    launcher.scripts.OnDragStart(launcher)
+    assert(math.abs(c.ns.prefs.minimapAngle - 90) < 0.001)
+    assert(math.abs(launcher.point[4]) < 0.001 and math.abs(launcher.point[5] - 88) < 0.001)
+    x, y = 200, 400
+    launcher.scripts.OnUpdate(launcher, 0.016)
+    assert(math.abs(c.ns.prefs.minimapAngle - 180) < 0.001)
+    assert(math.abs(launcher.point[4] + 88) < 0.001 and math.abs(launcher.point[5]) < 0.001)
+    launcher.scripts.OnDragStop(launcher)
+    equal(launcher.scripts.OnUpdate, nil)
+    launcher.scripts.OnClick(launcher, "LeftButton")
+    for _, control in ipairs(widgets) do assert(control.frameName ~= "GuildQueueFrame") end
+    launcher.scripts.OnMouseDown(launcher, "LeftButton")
+    launcher.scripts.OnClick(launcher, "LeftButton")
+    equal(c.env.UISpecialFrames[1], "GuildQueueFrame")
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("minimap position restores from per-character preferences without changing another character", function()
+    local c = client({ saved = { roles = 4, dungeons = { [1] = true }, minimapAngle = 90 } })
+    openUI(c, true)
+    local launcher = c.ns.InitializeMinimap()
+    assert(math.abs(launcher.point[4]) < 0.001 and math.abs(launcher.point[5] - 88) < 0.001)
+    c.env.GetCursorPosition = function() return 100, 200 end
+    launcher.scripts.OnDragStart(launcher)
+    launcher.scripts.OnDragStop(launcher)
+    equal(c.ns.prefs.minimapAngle, 180)
+    local restored = client({ saved = { roles = 4, dungeons = { [1] = true }, minimapAngle = c.ns.prefs.minimapAngle } })
+    openUI(restored, true)
+    assert(math.abs(restored.ns.InitializeMinimap().point[4] + 88) < 0.001)
+    local other = client()
+    openUI(other, true)
+    equal(other.ns.prefs.minimapAngle, 225)
+    equal(c.ns.prefs.minimapAngle, 180)
+end)
+test("minimap initialization safely replaces malformed and nonfinite saved positions", function()
+    for _, angle in ipairs({ false, "bad", -1, 360, math.huge, -math.huge, 0 / 0 }) do
+        local c = client({ saved = { roles = 2, dungeons = { [1] = true }, minimapAngle = angle } })
+        openUI(c, true)
+        local launcher = c.ns.InitializeMinimap()
+        equal(c.ns.prefs.minimapAngle, 225)
+        assert(launcher.point[4] == launcher.point[4] and launcher.point[5] == launcher.point[5])
+        equal(c.ns.prefs.roles, 2) assert(c.ns.prefs.dungeons[1] and not c.ns.queued)
+    end
+end)
+test("minimap launcher follows resized minimap dimensions without an idle update loop", function()
+    local c = client({ saved = { roles = 4, dungeons = { [1] = true }, minimapAngle = 0 } })
+    openUI(c, true)
+    local launcher = c.ns.InitializeMinimap()
+    equal(launcher.point[4], 88) equal(launcher.point[5], 0)
+    c.env.Minimap:SetSize(200, 120)
+    equal(launcher.point[4], 108) equal(launcher.point[5], 0)
+    equal(launcher.scripts.OnUpdate, nil)
+    c.env.Minimap:SetScale(2)
+    c.env.GetCursorPosition = function() return 400, 600 end
+    launcher.scripts.OnDragStart(launcher)
+    launcher.scripts.OnDragStop(launcher)
+    assert(math.abs(launcher.point[4]) < 0.001 and math.abs(launcher.point[5] - 68) < 0.001)
+    equal(launcher.scripts.OnUpdate, nil)
+end)
+test("minimap hover explains controls and hiding stops dragging without clearing someone else's tooltip", function()
+    local c = client()
+    openUI(c, true)
+    local launcher = c.ns.InitializeMinimap()
+    launcher.scripts.OnEnter(launcher)
+    equal(c.tooltip.title, "Guild Queue")
+    assert(c.tooltip.shown and c.tooltip.text:find("Drag", 1, true))
+    launcher.scripts.OnLeave(launcher)
+    assert(not c.tooltip.shown)
+    launcher.scripts.OnEnter(launcher)
+    launcher.scripts.OnDragStart(launcher)
+    assert(not c.tooltip.shown)
+    launcher.scripts.OnEnter(launcher)
+    assert(not c.tooltip.shown)
+    local other = {}
+    c.env.GameTooltip:SetOwner(other)
+    c.env.GameTooltip:Show()
+    launcher:Hide()
+    equal(launcher.scripts.OnUpdate, nil)
+    assert(c.tooltip.shown and c.tooltip.owner == other)
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
 
 local function roleListUI(c)
     local widgets, views, tabs = openUI(c), {}, {}

@@ -101,6 +101,29 @@ test("common dungeon selections are a new intersection without changing either i
     assert(next(ns.CommonDungeons({}, right)) == nil)
 end)
 
+test("all dungeon names display recommended ranges without changing permanent IDs or wire lists", function()
+    equal(#ns.DUNGEONS, 34)
+    for id, dungeon in ipairs(ns.DUNGEONS) do
+        equal(dungeon.id, id)
+        assert(dungeon.minLevel >= 1 and dungeon.minLevel <= dungeon.maxLevel and dungeon.maxLevel <= 60)
+        assert(not dungeon.name:find("%(%d+%-%d+%)"))
+        equal(ns.DungeonName(dungeon), dungeon.name .. " (" .. dungeon.minLevel .. "-" .. dungeon.maxLevel .. ")")
+    end
+    equal(ns.DungeonName(ns.DUNGEON_BY_ID[2]), "Hall of Thanes (13-20)")
+    equal(ns.DungeonText({ [1] = true, [9] = true }), "Ragefire Chasm (13-18), Excavation Site (26-33)")
+    equal(ns.Protocol.DungeonList({ [1] = true, [9] = true }), "1,9")
+    equal(ns.DungeonName({ name = "Unknown" }), "Unknown")
+end)
+test("optional requested-role notices round trip and reject malformed targets roles and dates", function()
+    local p = ns.Protocol.Decode(ns.Protocol.Encode({ kind = "R", sentAt = 1000, role = 2, target = "Friend-TestRealm" }))
+    equal(p.kind, "R") equal(p.role, 2) equal(p.target, "Friend-TestRealm") equal(p.sentAt, 1000)
+    for _, message in ipairs({ "1|R|1000|3|Friend-TestRealm", "1|R|1000|0|Friend-TestRealm",
+        "1|R|0|1|Friend-TestRealm", "1|R|1000|1|Friend", "1|R|1000|1|Friend TestRealm",
+        "1|R|1000|1|Friend-TestRealm|extra", "1|R|1000|1|Friend-\nRealm" }) do
+        assert(ns.Protocol.Decode(message) == nil, message)
+    end
+end)
+
 -- Versioning, leases, tombstones and membership.
 test("out of order and duplicate messages cannot change the live queue", function()
     local state = ns.State.New()
@@ -396,6 +419,20 @@ test("matcher agrees with brute-force full and partial feasibility on 200 genera
     end
 end)
 
+test("party role-slot checks agree with exhaustive assignment and never mutate offered roles", function()
+    math.randomseed(1313)
+    for iteration = 1, 200 do
+        local players, masks = {}, {}
+        for index = 1, math.random(1, 6) do
+            local role = math.random(1, 7)
+            players[index], masks[index] = { name = "P" .. index, roles = role, dungeons = { [1] = true } }, role
+        end
+        equal(ns.CanFitRoleSlots(players), maximumMatch(players, 1, 1, {}) == #players)
+        for index, player in ipairs(players) do equal(player.roles, masks[index]) end
+    end
+    assert(not ns.CanFitRoleSlots({ { name = "Same", roles = 1 }, { name = "same", roles = 2 } }))
+end)
+
 -- Minimal simulated clients exercise real Core code, not a second implementation.
 -- UI is separately syntax-checked and smoke-tested below with widget stubs.
 local function client(options)
@@ -418,9 +455,10 @@ local function client(options)
     env.GetServerTime = function() return c.now end
     env.GetNormalizedRealmName = function() return "TestRealm" end
     env.UnitFullName = function(unit)
-        local index = type(unit) == "string" and unit:match("^party(%d+)$")
+        local index = type(unit) == "string" and (unit:match("^party(%d+)$") or unit:match("^raid(%d+)$"))
         if index then
-            local member = (c.partyMembers or {})[tonumber(index)]
+            local members = unit:match("^raid") and c.raidMembers or c.partyMembers
+            local member = (members or {})[tonumber(index)]
             if type(member) == "table" then return member.name, member.realm end
             if type(member) ~= "string" then return nil end
             local name, realm = member:match("^(.-)%-(.+)$")
@@ -447,6 +485,10 @@ local function client(options)
     env.GetNumSubgroupMembers = function(category)
         equal(category, env.LE_PARTY_CATEGORY_HOME)
         return c.partyCount or #(c.partyMembers or {})
+    end
+    env.GetNumGroupMembers = function(category)
+        equal(category, env.LE_PARTY_CATEGORY_HOME)
+        return #(c.raidMembers or {})
     end
     env.InCombatLockdown = function() return c.combat end
     env.C_PartyInfo = {
@@ -604,6 +646,219 @@ test("partial invitation failures and repeat clicks never cause automatic retrie
     equal(#c.invites, 2)
 end)
 
+test("queued preference changes invalidate old suggestions and retry only latest selections after lockdown", function()
+    local c = client()
+    local group = suggestedGroup(c)
+    local age, sent = c.ns.joinedAt, #c.sent
+    c.locked = true
+    c.ns.prefs.roles, c.ns.prefs.dungeons = 4, { [2] = true }
+    c.ns.PreferencesChanged()
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
+    equal(c.ns.joinedAt, age)
+    equal(c.ns.state.records[c.ns.playerName], nil)
+    assert(not c.ns.CreateParty(group))
+    c:advance(6)
+    c.ns.prefs.roles, c.ns.prefs.dungeons = 2, { [3] = true }
+    c.ns.PreferencesChanged()
+    c.ns.prefs.roles, c.ns.prefs.dungeons = 4, { [2] = true }
+    c.ns.PreferencesChanged()
+    equal(#c.sent, sent)
+    c.locked = false
+    c:advance(6)
+    local record = c.ns.state.records[c.ns.playerName]
+    assert(record and record.roles == 4 and record.dungeons[2] and not record.dungeons[1])
+    equal(record.joinedAt, age)
+    assert(not c.ns.QueueUpdatePending())
+    local updates = 0
+    for index = sent + 1, #c.sent do
+        local p = c.ns.Protocol.Decode(c.sent[index].text)
+        if p.kind == "S" then
+            updates = updates + 1
+            assert(p.roles == 4 and p.dungeons[2] and not p.dungeons[3])
+        end
+    end
+    equal(updates, 1)
+    equal(#c.invites, 0)
+end)
+test("leaving overrides blocked queued preference changes and never replays a pending join", function()
+    local c = client()
+    suggestedGroup(c)
+    c.locked = true
+    c.ns.prefs.dungeons = { [2] = true }
+    c.ns.PreferencesChanged()
+    c.ns.SetQueued(false)
+    local sent = #c.sent
+    c:advance(6)
+    c.locked = false
+    c:advance(6)
+    assert(not c.ns.queued and not c.ns.QueueUpdatePending())
+    equal(c.ns.state.records[c.ns.playerName], nil)
+    local withdrawals = 0
+    for index = sent + 1, #c.sent do
+        local p = c.ns.Protocol.Decode(c.sent[index].text)
+        assert(p.kind ~= "S")
+        if p.kind == "X" then withdrawals = withdrawals + 1 end
+    end
+    equal(withdrawals, 1)
+end)
+test("send failures keep changed selections pending until a successful newest-state broadcast", function()
+    local c = client()
+    local old = suggestedGroup(c)
+    c.result = 11
+    c.ns.prefs.roles, c.ns.prefs.dungeons = 2, { [2] = true }
+    c.ns.PreferencesChanged()
+    c:advance(6)
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
+    assert(not c.ns.CreateParty(old))
+    c.ns.prefs.dungeons = { [3] = true }
+    c.ns.PreferencesChanged()
+    local sent = #c.sent
+    c.result = 0
+    c:advance(5)
+    assert(not c.ns.QueueUpdatePending())
+    for index = sent + 1, #c.sent do
+        local p = c.ns.Protocol.Decode(c.sent[index].text)
+        if p.kind == "S" then assert(p.roles == 2 and p.dungeons[3] and not p.dungeons[2]) end
+    end
+    equal(#c.invites, 0)
+end)
+test("group clicks revalidate unsignalled local selection and assigned-role or dungeon changes", function()
+    for _, change in ipairs({ "ownRoles", "ownDungeons", "peerRoles", "peerDungeons" }) do
+        local c = client()
+        local group = suggestedGroup(c)
+        if change == "ownRoles" then c.ns.prefs.roles = 4
+        elseif change == "ownDungeons" then c.ns.prefs.dungeons = { [2] = true }
+        elseif change == "peerRoles" then c.ns.state.records["Friend-TestRealm"].roles = 4
+        else c.ns.state.records["Friend-TestRealm"].dungeons = { [2] = true } end
+        assert(c.ns.CreatePartyDisabledReason(group), change)
+        assert(not c.ns.CreateParty(group), change)
+        equal(#c.invites, 0)
+    end
+end)
+test("party Role List intersects every member's dungeons and marks existing members", function()
+    local c = client()
+    c.ns.prefs.roles, c.ns.prefs.dungeons = 4, { [1] = true, [2] = true }
+    c:receive("Tank-TestRealm", packet(1, 1, { [1] = true }, c.now, c.now))
+    c:receive("WrongHealer-TestRealm", packet(1, 2, { [2] = true }, c.now, c.now))
+    c:receive("GoodHealer-TestRealm", packet(1, 2, { [1] = true, [2] = true }, c.now, c.now))
+    c.homeGroup, c.partyMembers = true, { "Tank-TestRealm" }
+    local lists, reason = c.ns.GetRoleLists()
+    assert(reason == nil)
+    equal(#lists[1], 1)
+    assert(lists[1][1].inParty)
+    equal(#lists[2], 1)
+    equal(lists[2][1].player.name, "GoodHealer-TestRealm")
+    assert(lists[2][1].dungeons[1] and not lists[2][1].dungeons[2])
+    local disabled, _, inParty = c.ns.QueueInviteDisabledReason("Tank-TestRealm", 1)
+    assert(disabled and inParty)
+    assert(not c.ns.InviteQueuedPlayer("Tank-TestRealm", 1))
+    assert(not c.ns.InviteQueuedPlayer("WrongHealer-TestRealm", 2))
+    assert(c.ns.InviteQueuedPlayer("GoodHealer-TestRealm", 2))
+    equal(#c.invites, 1)
+end)
+test("party role columns and actual clicks constrain a flexible recruit to the requested remaining role", function()
+    local c = client()
+    c.ns.prefs.roles = 2
+    c:receive("Tank-TestRealm", packet(1, 1, nil, c.now, c.now))
+    c:receive("Flexible-TestRealm", packet(1, 7, nil, c.now, c.now))
+    c.homeGroup, c.partyMembers = true, { "Tank-TestRealm" }
+    local lists = c.ns.GetRoleLists()
+    equal(#lists[1], 1) -- Existing tank stays visible; recruit cannot fill a second tank slot.
+    equal(#lists[2], 0)
+    equal(#lists[4], 1)
+    assert(not c.ns.InviteQueuedPlayer("Flexible-TestRealm", 1))
+    assert(not c.ns.InviteQueuedPlayer("Flexible-TestRealm", 2))
+    assert(not c.ns.InviteQueuedPlayer("Flexible-TestRealm", 3))
+    c.ns.state.records["Flexible-TestRealm"].roles = 1 -- Changes between rendering and clicking.
+    assert(not c.ns.InviteQueuedPlayer("Flexible-TestRealm", 4))
+    c.ns.state.records["Flexible-TestRealm"].roles = 7
+    assert(c.ns.InviteQueuedPlayer("Flexible-TestRealm", 4))
+    equal(#c.invites, 1)
+end)
+test("unverifiable expired or incompatible party preferences block recruitment instead of guessing", function()
+    for _, condition in ipairs({ "missing", "expired", "disjoint", "unknownRoster" }) do
+        local c = client()
+        c:receive("Recruit-TestRealm", packet(1, 2, nil, c.now, c.now))
+        c.homeGroup, c.partyMembers = true, { "Tank-TestRealm" }
+        if condition ~= "missing" then
+            c:receive("Tank-TestRealm", packet(1, 1, condition == "disjoint" and { [2] = true } or nil, c.now, c.now))
+        end
+        if condition == "expired" then c.ns.state.records["Tank-TestRealm"].sentAt = c.now - c.ns.TIMEOUT end
+        if condition == "unknownRoster" then c.partyMembers = { {} } end
+        local lists, reason = c.ns.GetRoleLists()
+        assert(reason, condition)
+        for _, role in ipairs({ 1, 2, 4 }) do equal(#lists[role], 0) end
+        assert(not c.ns.InviteQueuedPlayer("Recruit-TestRealm", 2), condition)
+        equal(#c.invites, 0)
+    end
+end)
+test("role-column clicks queue one guild-only informational notice and never assign or auto-invite roles", function()
+    local c = client()
+    c:receive("Friend-TestRealm", packet(1, 7, nil, c.now, c.now))
+    assert(c.ns.InviteQueuedPlayer("Friend-TestRealm", 1))
+    c:advance(3)
+    local notices = 0
+    for _, message in ipairs(c.sent) do
+        local p = c.ns.Protocol.Decode(message.text)
+        if p.kind == "R" then
+            notices = notices + 1
+            equal(p.role, 1) equal(p.target, "Friend-TestRealm") equal(message.channel, "GUILD")
+        end
+    end
+    equal(notices, 1)
+    equal(#c.invites, 1)
+    equal(c.ns.prefs.roles, 4)
+    c:advance(6)
+    equal(#c.invites, 1)
+end)
+test("role notices are recipient-only fresh offered-role messages with duplicate and channel protection", function()
+    local c = client()
+    c.ns.SetQueued(true)
+    local before = #c.messages
+    local p = { kind = "R", sentAt = c.now, role = 4, target = c.ns.playerName }
+    c:receive("Leader-TestRealm", p)
+    equal(#c.messages, before + 1)
+    assert(c.messages[#c.messages]:find("requests you as Damage", 1, true))
+    c:receive("Leader-TestRealm", p)
+    c:receive("Leader-TestRealm", p, "WHISPER")
+    c:receive("Leader-TestRealm", p, "GUILD", "OtherAddon")
+    c:receive("Other-TestRealm", { kind = "R", sentAt = c.now, role = 4, target = "SomebodyElse-TestRealm" })
+    c:receive("Other-TestRealm", { kind = "R", sentAt = c.now, role = 1, target = c.ns.playerName })
+    c:receive("Other-TestRealm", { kind = "R", sentAt = c.now - 30, role = 4, target = c.ns.playerName })
+    c:receive("Other-TestRealm", { kind = "R", sentAt = c.now + 6, role = 4, target = c.ns.playerName })
+    equal(#c.messages, before + 1)
+    equal(c.ns.state.records["Leader-TestRealm"], nil)
+    equal(c.ns.prefs.roles, 4)
+    equal(#c.invites, 0)
+end)
+test("failed expired and old-guild role notices are never delivered or retried as invitations", function()
+    for _, condition in ipairs({ "failed", "expired", "guildChanged" }) do
+        local c = client()
+        c:receive("Friend-TestRealm", packet(1, 4, nil, c.now, c.now))
+        if condition == "failed" then c.failInvite = "Friend-TestRealm" end
+        local result = c.ns.InviteQueuedPlayer("Friend-TestRealm", 4)
+        equal(result, condition ~= "failed")
+        if condition == "expired" then c.locked = true c:advance(31) c.locked = false end
+        if condition == "guildChanged" then c.guild = "Another Guild" c:fire("PLAYER_GUILD_UPDATE", "player") end
+        c:advance(6)
+        for _, message in ipairs(c.sent) do assert(c.ns.Protocol.Decode(message.text).kind ~= "R") end
+        equal(#c.invites, condition == "failed" and 0 or 1)
+    end
+end)
+test("Quest invitations skip existing party or raid members without requiring dungeon queue data", function()
+    local c = client({ roster = { "Self-TestRealm", "Friend-TestRealm", "Other-TestRealm" },
+        rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" }, ["Other-TestRealm"] = { area = "Elwynn Forest" } } })
+    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    c.raid, c.raidMembers = true, { "Self-TestRealm", "Friend-TestRealm" }
+    assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
+    assert(c.ns.InviteQuestingPlayer("Other-TestRealm"))
+    equal(#c.invites, 1)
+    equal(c.ns.state.records["Other-TestRealm"], nil)
+    c.env.GetNumGroupMembers = nil
+    assert(not c.ns.InviteQuestingPlayer("Other-TestRealm"))
+end)
+
 test("role lists use shared dungeons and longest queue time without assigning players to groups", function()
     local c = client({ roster = {} })
     for _, entry in ipairs({ { "Bflex", 7, 30, 1 }, { "OldTank", 1, 200, 1 },
@@ -634,7 +889,8 @@ test("queued-player invites work across zones without joining queue or having a 
     local c = client({ roster = {} })
     c:receive("Remote-TestRealm", packet(1, 1, nil, c.now, c.now))
     equal(#c.ns.groups, 0)
-    c.homeGroup = true -- A party leader can keep inviting in the manual view.
+    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    c:receive("Friend-TestRealm", packet(1, 2, nil, c.now, c.now))
     assert(c.ns.InviteQueuedPlayer("Remote-TestRealm"))
     equal(#c.invites, 1)
     equal(c.invites[1], "Remote-TestRealm")
@@ -997,15 +1253,15 @@ test("same-zone invites work without addon peers or shared quests and never retr
     local c = client({ rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
     assert(not c.ns.prefs.shareQuests and next(c.ns.questing.peers) == nil)
     assert(c.ns.QuestInviteDisabledReason("Friend-TestRealm") == nil)
-    c.inviteCreatesParty = true
     assert(c.ns.InviteQuestingPlayer("Friend Test Realm"))
     equal(#c.invites, 1)
     equal(c.invites[1], "Friend-TestRealm")
     assert(not c.ns.InviteQuestingPlayer("Friend-TestRealm"))
     c:advance(6)
     equal(#c.invites, 1)
+    c.homeGroup, c.partyMembers = true, { "Other-TestRealm" }
     assert(c.ns.QuestInviteDisabledReason("Friend-TestRealm") == nil)
-    assert(c.ns.InviteQuestingPlayer("Friend-TestRealm")) -- Existing group with invite permission.
+    assert(c.ns.InviteQuestingPlayer("Friend-TestRealm")) -- Other need not be queued or share dungeons.
     equal(#c.invites, 2)
     assert(not c.ns.queued and not c.ns.prefs.shareQuests)
 end)
@@ -1733,7 +1989,7 @@ test("Role List cards duplicate selected roles filter shared dungeons and sort l
         if card.guildQueueKind == "rolePlayer" and card.shown then
             rows[card.role][#rows[card.role] + 1] = card
             assert(card.player.name ~= "Hidden-TestRealm")
-            equal(card.dungeons.text, c.ns.DUNGEON_BY_ID[1].name)
+            equal(card.dungeons.text, c.ns.DungeonName(c.ns.DUNGEON_BY_ID[1]))
             local expectedX = card.role == 1 and 0 or card.role == 2 and 246 or 492
             equal(card.point[2], expectedX)
             assert(card.point[2] + card:GetWidth() <= 728)
@@ -1770,7 +2026,7 @@ test("Role List updates shared-dungeon filters and expiry without joining the qu
     equal(toolbar.columns[4].text, "Damage (0)")
     c:receive("Friend-TestRealm", packet(2, 4, { [1] = true, [2] = true }, c.now, c.now))
     assert(card.shown)
-    equal(card.dungeons.text, c.ns.DUNGEON_BY_ID[2].name)
+    equal(card.dungeons.text, c.ns.DungeonName(c.ns.DUNGEON_BY_ID[2]))
     c:advance(c.ns.TIMEOUT)
     assert(not card.shown)
     equal(toolbar.columns[4].text, "Damage (0)")
@@ -1845,6 +2101,74 @@ test("Role List Default and Quests retain independent scrolling and the last def
     equal(scroll:GetVerticalScroll(), defaultPosition)
     equal(#c.invites, 0)
 end)
+test("Role List uses party-wide shared dungeons role-specific clicks and already-in-party badges", function()
+    local c = client()
+    c.ns.prefs.roles = 2
+    c.ns.SetQueued(true)
+    c:advance(1)
+    c:receive("Tank-TestRealm", packet(1, 1, nil, c.now, c.now))
+    c:receive("Flexible-TestRealm", packet(1, 7, nil, c.now, c.now))
+    c.homeGroup, c.partyMembers = true, { "Tank-TestRealm" }
+    local widgets = roleListUI(c)
+    local tank, selfCard, recruit
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "rolePlayer" and widget.shown then
+            if widget.player.name == "Tank-TestRealm" then tank = widget end
+            if widget.player.name == c.ns.playerName then selfCard = widget end
+            if widget.player.name == "Flexible-TestRealm" then
+                assert(recruit == nil) -- Only Damage fits; no misleading Tank or Healer copies.
+                recruit = widget
+            end
+        end
+    end
+    assert(tank and selfCard and recruit)
+    equal(tank.invite.text, "In party") assert(not tank.invite.enabled)
+    equal(selfCard.invite.text, "You") assert(not selfCard.invite.enabled)
+    equal(recruit.invite.text, "Invite as Damage")
+    equal(recruit.invite.requestedRole, 4)
+    recruit.invite.scripts.OnEnter(recruit.invite)
+    assert(c.tooltip.text:find("Confirm the role", 1, true))
+    recruit.invite.scripts.OnClick(recruit.invite)
+    equal(#c.invites, 1)
+    c:advance(3)
+    local found = false
+    for _, message in ipairs(c.sent) do
+        local p = c.ns.Protocol.Decode(message.text)
+        if p.kind == "R" then found = true equal(p.role, 4) end
+    end
+    assert(found)
+end)
+test("Role List explains unavailable party preferences instead of showing misleading candidates", function()
+    local c = client()
+    c:receive("Recruit-TestRealm", packet(1, 2, nil, c.now, c.now))
+    c.homeGroup, c.partyMembers = true, { "Unknown-TestRealm" }
+    local widgets = roleListUI(c)
+    local toolbar
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "roleToolbar" then toolbar = widget end
+        if widget.guildQueueKind == "rolePlayer" then assert(not widget.shown) end
+    end
+    assert(toolbar.hint.text:find("Every party member", 1, true))
+    equal(#c.invites, 0)
+end)
+test("dungeon labels show ranges and filling guidance never tells users to withdraw early", function()
+    local c = client()
+    local widgets = openUI(c)
+    local dungeons, guidance = 0, false
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "dungeon" then
+            dungeons = dungeons + 1
+            equal(widget.caption.text, c.ns.DungeonName(c.ns.DUNGEON_BY_ID[widget.id]))
+        end
+        if type(widget.text) == "string" then
+            if widget.text:find("Stay queued while filling", 1, true) then guidance = true end
+            assert(not widget.text:find("Leave the dungeon queue once your party is formed", 1, true))
+        end
+    end
+    equal(dungeons, #c.ns.DUNGEONS)
+    assert(guidance)
+end)
+
 test("Role List text fits its cards toolbar and native view selectors", function()
     local c = client()
     c.ns.SetQueued(true)

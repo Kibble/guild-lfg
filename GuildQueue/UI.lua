@@ -143,9 +143,10 @@ end
 
 local function showQueueInviteTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Invite")
-    GameTooltip:AddLine(ns.QueueInviteDisabledReason(control.memberName)
-        or "Invite this queued player to your party. They must accept.", 1, 1, 1, true)
+    GameTooltip:SetText(control.actionLabel or "Invite")
+    GameTooltip:AddLine(ns.QueueInviteDisabledReason(control.memberName, control.requestedRole)
+        or ("Request " .. (ns.ROLE_NAMES[control.requestedRole] or "a role")
+            .. " and invite this player. Updated addons receive a role notice. Confirm the role with them; it is not assigned automatically."), 1, 1, 1, true)
     GameTooltip:Show()
 end
 
@@ -399,7 +400,7 @@ local function renderGroup(group, index, own, y)
     card.kicker:SetText(own and (count < 5 and "YOUR PARTIAL MATCH" or "YOUR SUGGESTED GROUP")
         or ("SUGGESTED GROUP " .. index))
     local dungeon = ns.DUNGEON_BY_ID[group.dungeonID]
-    local title = dungeon and dungeon.name or "Shared dungeon"
+    local title = dungeon and ns.DungeonName(dungeon) or "Shared dungeon"
     card.title:SetText(ns.SafeText(title))
     card.common:SetText("Common dungeons: " .. ns.SafeText(ns.DungeonText(group.dungeons)))
     card.tooltipTitle = ns.SafeText(title)
@@ -520,7 +521,7 @@ local function newRolePersonCard()
     card.wait = label(card, "", 10, 30, ROLE_COLUMN_WIDTH - 20, 16, nil, C.muted)
     card.dungeons = label(card, "", 10, 49, ROLE_COLUMN_WIDTH - 20, 26, nil, C.muted, true)
     card.invite = button(card, "Invite", 10, 82, ROLE_COLUMN_WIDTH - 20, 24, function(self)
-        ns.InviteQueuedPlayer(self.memberName)
+        ns.InviteQueuedPlayer(self.memberName, self.requestedRole)
     end, "queueInvite")
     card.invite:SetMotionScriptsWhileDisabled(true)
     card.invite.tooltip = showQueueInviteTooltip
@@ -536,10 +537,11 @@ local function newRoleEmpty()
 end
 
 local function renderRoleList()
-    local lists, now, height = ns.GetRoleLists(), GetServerTime(), 136
-    roleToolbar.hint:SetText(next(ns.prefs.dungeons)
-        and "Longest waiting first. Multi-role players appear in each selected role."
-        or "Select dungeons on the left to see players with shared selections.")
+    local lists, reason = ns.GetRoleLists()
+    local now, height = GetServerTime(), 136
+    roleToolbar.hint:SetText(reason or (next(ns.prefs.dungeons)
+        and "Offered roles, longest waiting first. Existing-party compatibility is checked; confirm requested roles."
+        or "Select dungeons on the left to see players with shared selections."))
     for index, role in ipairs({ 1, 2, 4 }) do
         local column, x = lists[role], (index - 1) * (ROLE_COLUMN_WIDTH + 12)
         roleToolbar.columns[role]:SetText(ns.ROLE_NAMES[role] .. " (" .. #column .. ")")
@@ -560,9 +562,15 @@ local function renderRoleList()
             surface(card, player.name == ns.playerName and C.own or C.card)
             playerTooltip(card, player)
             card.tooltipText = card.tooltipText .. "\nShared dungeons: " .. ns.SafeText(ns.DungeonText(entry.dungeons))
-            if card.invite.memberName ~= player.name then hideTooltip(card.invite) end
-            card.invite.memberName = player.name
-            card.invite:SetEnabled(ns.QueueInviteDisabledReason(player.name) == nil)
+            if card.invite.memberName ~= player.name or card.invite.requestedRole ~= role then
+                hideTooltip(card.invite)
+            end
+            card.invite.memberName, card.invite.requestedRole = player.name, role
+            local disabled, _, inParty = ns.QueueInviteDisabledReason(player.name, role)
+            card.invite.actionLabel = player.name == ns.playerName and "You"
+                or inParty and "In party" or ("Invite as " .. ns.ROLE_NAMES[role])
+            card.invite:SetText(card.invite.actionLabel)
+            card.invite:SetEnabled(disabled == nil)
             paint(card.invite)
         end
         height = math.max(height, 64 + #column * ROLE_ROW_HEIGHT)
@@ -605,7 +613,9 @@ local function renderQuesting()
         local card = acquire(pools.questing, newQuestCard)
         card.member = member
         card.invite.memberName = member.name
-        card.invite:SetEnabled(ns.QuestInviteDisabledReason(member.name) == nil)
+        local reason, _, inParty = ns.QuestInviteDisabledReason(member.name)
+        card.invite:SetText(inParty and "In party" or "Invite")
+        card.invite:SetEnabled(reason == nil)
         paint(card.invite)
         card.name:SetText(ns.SafeText(member.name))
         card.level:SetText(member.level > 0 and ("Level " .. member.level) or "Level unavailable")
@@ -702,7 +712,7 @@ local function renderOutput(players)
             end
             if control.guildQueueKind == "rolePlayer" then
                 hideTooltip(control.invite)
-                control.invite.memberName = nil
+                control.invite.memberName, control.invite.requestedRole = nil, nil
             end
             control:Hide()
         end
@@ -735,7 +745,7 @@ function ns.RefreshUI()
     guildLabel:SetText(ns.SafeText(ns.guildName or "No guild"))
     status:SetText(ns.SafeText(ns.StatusText()))
     local stateText = ns.queued and "Queued" or "Not queued"
-    if ns.queued and not ns.state.records[ns.playerName] then stateText = "Waiting to broadcast" end
+    if ns.QueueUpdatePending() then stateText = "Waiting to broadcast" end
     queueStatus:SetText(stateText)
     colorText(queueStatus, ns.queued and C.green or C.muted)
     counters.queued:SetText(#players)
@@ -860,7 +870,7 @@ local function createUI()
     dungeonScroll = scrollArea(sidebar, 12, 224, 236, 206, "dungeonScroll")
     dungeonScroll.content:SetHeight(math.max(1, #ns.DUNGEONS * 38))
     for index, dungeon in ipairs(ns.DUNGEONS) do
-        local control = check(dungeonScroll.content, dungeon.name, 0, (index - 1) * 38, 218, 34,
+        local control = check(dungeonScroll.content, ns.DungeonName(dungeon), 0, (index - 1) * 38, 218, 34,
             function(self)
                 ns.prefs.dungeons[self.id] = self:GetChecked() and true or nil
                 ns.PreferencesChanged()
@@ -869,7 +879,7 @@ local function createUI()
         dungeonChecks[dungeon.id] = control
     end
     dungeonScroll.update()
-    label(sidebar, "Scroll for the full dungeon list", 14, 439, 230, 16, nil, C.muted)
+    label(sidebar, "Ranges are recommended levels", 14, 439, 230, 16, nil, C.muted)
     button(sidebar, "Select all", 14, 464, 111, 28, function()
         for _, dungeon in ipairs(ns.DUNGEONS) do ns.prefs.dungeons[dungeon.id] = true end
         ns.PreferencesChanged()
@@ -928,7 +938,7 @@ local function createUI()
     questToolbar:Hide()
     solid(frame, 18, 695, 1024, 1, C.border)
     status = label(frame, "", 24, 699, 1012, 14, nil, C.muted)
-    label(frame, "Invites are sent only when you click Create party or Invite. Leave the dungeon queue once your party is formed.",
+    label(frame, "Invitations are click-only. Stay queued while filling your party; leave when everyone is finished looking.",
         24, 715, 1012, 14, nil, C.heading)
     frame:SetScript("OnShow", function()
         fitScreen()

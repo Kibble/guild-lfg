@@ -1,5 +1,38 @@
 local _, ns = ...
 
+-- Unlike Match, every supplied player must fit. This does not assign or agree
+-- on anyone's role; callers can restrict one copy to a clicked role column.
+function ns.CanFitRoleSlots(players)
+    if type(players) ~= "table" then return false end
+    local count = 0
+    for index in pairs(players) do
+        if type(index) ~= "number" or index % 1 ~= 0 or index < 1 or index > 5 then return false end
+        count = count + 1
+    end
+    if count < 1 or count > 5 or #players ~= count then return false end
+    local slots, names = {}, {}
+    local function place(player, visited)
+        for slot, role in ipairs(ns.SLOTS) do
+            if not visited[slot] and ns.HasRole(player.roles, role) then
+                visited[slot] = true
+                if not slots[slot] or place(slots[slot], visited) then
+                    slots[slot] = player
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    for _, player in ipairs(players) do
+        if type(player) ~= "table" or type(player.name) ~= "string" or player.name == ""
+            or names[player.name:lower()] or type(player.roles) ~= "number"
+            or player.roles % 1 ~= 0 or player.roles < 1 or player.roles > 7 then return false end
+        names[player.name:lower()] = true
+        if not place(player, {}) then return false end
+    end
+    return true
+end
+
 local function candidateForDungeon(players, used, dungeonID)
     local slots, count = {}, 0
     -- Augmenting paths can move an already assigned multi-role player to another

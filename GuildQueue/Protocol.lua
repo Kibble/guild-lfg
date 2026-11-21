@@ -38,10 +38,15 @@ function Protocol.DecodeDungeons(text)
     return selected, count
 end
 
--- No identity is carried in the payload: the game-provided sender owns this state.
+-- Queue state never carries a sender identity: the game-provided sender owns
+-- it. Optional role notices carry only their intended recipient, not peer state.
 function Protocol.Encode(packet)
     if packet.kind == "H" or packet.kind == "P" then
         return "1|" .. packet.kind
+    end
+    if packet.kind == "R" then
+        return table.concat({ "1", "R", string.format("%.0f", packet.sentAt),
+            tostring(packet.role), packet.target }, "|")
     end
     local parts = { "1", packet.kind, string.format("%.0f", packet.revision),
         string.format("%.0f", packet.sentAt) }
@@ -68,6 +73,15 @@ function Protocol.Decode(message)
         return nil
     end
     local kind = fields[2]
+    if kind == "R" then
+        local sentAt = integer(fields[3], 1, 9999999999)
+        local role = integer(fields[4], 1, 4)
+        local target = fields[5]
+        if #fields ~= 5 or not sentAt or (role ~= 1 and role ~= 2 and role ~= 4)
+            or type(target) ~= "string" or #target > 128 or target:find("[%c%s|]")
+            or not target:match("^[^%-]+%-.+$") then return nil end
+        return { kind = "R", sentAt = sentAt, role = role, target = target }
+    end
     if not ((kind == "X" and #fields == 4) or (kind == "S" and #fields == 7)) then
         return nil
     end

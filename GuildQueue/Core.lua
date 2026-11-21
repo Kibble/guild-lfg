@@ -10,6 +10,12 @@ local lastPartyInviteAt = -100
 local lastMemberInviteAt = {}
 local pendingRoleNotices, receivedRoleNotices = {}, {}
 local availableRoles
+local send, updateGuild, nextRevision, refreshFormationIndexes
+local queueRecordNames, matchupByGroup, matchupByKey, matchupByPlayer = {}, {}, {}, {}
+local formationClaims, formationByOwner, formationWatermarks, pendingFormationReleases = {}, {}, {}, {}
+local formationWatermarkCount, lastFormationFailure = 0, -100
+local FORMATION_CACHE_LIMIT, FORMATION_RACE_WINDOW = 256, 5
+ns.FORMATION_TIMEOUT = 30
 ns.queued = false
 ns.state = ns.State.New()
 ns.groups, ns.individuals = {}, {}
@@ -206,6 +212,7 @@ end
 
 local function rebuild()
     ns.groups, ns.individuals = ns.Match(ns.state)
+    refreshFormationIndexes()
     ns.RefreshUI()
 end
 
@@ -278,21 +285,272 @@ end
 
 local function queueRecordFresh(record, now)
     return type(record) == "table" and type(record.name) == "string"
-        and boundedNumber(record.sentAt, 1, now + 5) and now - record.sentAt < ns.TIMEOUT
+        and boundedNumber(record.sentAt, 1, math.min(now + 5, 9999999999)) and now - record.sentAt < ns.TIMEOUT
         and ns.Protocol.ValidSelections(record.roles, record.dungeons)
 end
 
 local function freshQueueRecord(name, now)
-    local record
-    -- Party and queue APIs need not use identical capitalization.
-    for key, player in pairs(ns.state.records) do
-        if key:lower() == name:lower() then
-            if record then return nil end
-            record = player
-        end
-    end
+    -- Keep canonical record names rather than references: an ordinary heartbeat
+    -- replaces a record without rebuilding unchanged matcher suggestions.
+    local recordName = queueRecordNames[name:lower()]
+    local record = recordName and ns.state.records[recordName]
     if not queueRecordFresh(record, now) or record.name:lower() ~= name:lower() then return nil end
     return record
+end
+
+local function matchupFingerprint(group, now)
+    if type(group) ~= "table" or type(group.members) ~= "table"
+        or #group.members < 2 or #group.members > 5 then return nil end
+    local members, seen = {}, {}
+    for _, member in ipairs(group.members) do
+        local name = type(member) == "table" and normalize(member.name)
+        local record = name and freshQueueRecord(name, now)
+        if not record or #name > 128 or name:find("[%c%s|]") or seen[name:lower()]
+            or not boundedNumber(record.joinedAt, 1, record.sentAt) then return nil end
+        local key = name:lower()
+        seen[key] = true
+        members[#members + 1] = { name = key, record = record }
+    end
+    table.sort(members, function(a, b) return a.name < b.name end)
+    local parts = { tostring(#members) }
+    for _, member in ipairs(members) do
+        local record, ids = member.record, {}
+        for id, selected in pairs(record.dungeons) do
+            if selected then ids[#ids + 1] = id end
+        end
+        table.sort(ids)
+        parts[#parts + 1] = tostring(#member.name) .. ":" .. member.name
+        parts[#parts + 1] = string.format("%.0f", record.joinedAt)
+        parts[#parts + 1] = tostring(record.roles)
+        parts[#parts + 1] = table.concat(ids, ",")
+    end
+    local text, first, second = table.concat(parts, "|"), 0, 0
+    for index = 1, #text do
+        local byte = text:byte(index)
+        -- Both products stay below 2^53, including on Lua's double numbers.
+        first = (first * 131 + byte) % 2147483647
+        second = (second * 65599 + byte) % 2147483647
+    end
+    return string.format("%08x%08x", first, second), seen
+end
+
+local function currentMatchup(subject, now)
+    local entry
+    if type(subject) == "table" then
+        entry = matchupByGroup[subject]
+    elseif type(subject) == "string" then
+        local name = normalize(subject)
+        entry = name and matchupByPlayer[name:lower()]
+    end
+    if entry and matchupByKey[entry.key] == entry
+        and matchupFingerprint(entry.group, now) == entry.key then return entry end
+end
+
+function ns.MatchupKey(group)
+    local entry = currentMatchup(group, GetServerTime())
+    return entry and entry.key
+end
+
+local function formationWinner(entry, now)
+    local winner
+    for _, claim in pairs(formationClaims[entry.key] or {}) do
+        if claim.deadline > now and not claim.released and entry.members[claim.owner:lower()]
+            and (not winner or claim.sentAt < winner.sentAt
+                or (claim.sentAt == winner.sentAt and (claim.owner:lower() < winner.owner:lower()
+                    or (claim.owner:lower() == winner.owner:lower() and claim.claimID < winner.claimID)))) then
+            winner = claim
+        end
+    end
+    return winner
+end
+
+function ns.FormationStatus(subject)
+    if not ns.IsReady() then return nil end
+    local now = GetServerTime()
+    local entry = currentMatchup(subject, now)
+    local winner = entry and formationWinner(entry, now)
+    if winner then
+        return { owner = winner.owner, remaining = math.ceil(winner.deadline - now),
+            isOwner = winner.owner:lower() == ns.playerName:lower(), key = entry.key }
+    end
+end
+
+function ns.FormationDisabledReason(subject)
+    local status = ns.FormationStatus(subject)
+    if status and not status.isOwner then
+        return ns.SafeText(status.owner) .. " is inviting this matchup (" .. status.remaining .. "s remaining).", status
+    end
+    return nil, status
+end
+
+local function retireFormation(claim)
+    claim.released = true
+    local owner = claim.owner:lower()
+    local claims = formationClaims[claim.key]
+    if claims and claims[owner] == claim then
+        claims[owner] = nil
+        if not next(claims) then formationClaims[claim.key] = nil end
+    end
+    if formationByOwner[owner] == claim then formationByOwner[owner] = nil end
+    local watermark = formationWatermarks[owner]
+    if watermark and watermark.claimID == claim.claimID and watermark.key == claim.key then
+        watermark.released = true
+    end
+end
+
+local function pruneFormations(now)
+    for _, claim in pairs(formationByOwner) do
+        local entry = matchupByKey[claim.key]
+        if claim.deadline <= now or not entry or not currentMatchup(entry.group, now) then
+            retireFormation(claim)
+        end
+    end
+    for owner, watermark in pairs(formationWatermarks) do
+        if watermark.expiresAt <= now then
+            formationWatermarks[owner] = nil
+            formationWatermarkCount = formationWatermarkCount - 1
+        end
+    end
+    for index = #pendingFormationReleases, 1, -1 do
+        if pendingFormationReleases[index].expiresAt <= now then table.remove(pendingFormationReleases, index) end
+    end
+end
+
+refreshFormationIndexes = function()
+    queueRecordNames, matchupByGroup, matchupByKey, matchupByPlayer = {}, {}, {}, {}
+    for name in pairs(ns.state.records) do
+        local lower = name:lower()
+        if queueRecordNames[lower] ~= nil then queueRecordNames[lower] = false
+        else queueRecordNames[lower] = name end
+    end
+    local now = GetServerTime()
+    for _, group in ipairs(ns.groups) do
+        local key, members = matchupFingerprint(group, now)
+        if key then
+            local entry = { group = group, key = key, members = members }
+            matchupByGroup[group] = entry
+            if matchupByKey[key] ~= nil then matchupByKey[key] = false
+            else matchupByKey[key] = entry end
+            for name in pairs(members) do matchupByPlayer[name] = entry end
+        end
+    end
+    pruneFormations(now)
+end
+
+local function activateFormation(owner, packet, entry)
+    local winner = formationWinner(entry, GetServerTime())
+    if winner and packet.sentAt > winner.sentAt + FORMATION_RACE_WINDOW then return nil end
+    local lower = owner:lower()
+    local claim = { owner = owner, claimID = packet.claimID, sentAt = packet.sentAt,
+        key = packet.matchupKey, deadline = packet.sentAt + ns.FORMATION_TIMEOUT, guildKey = ns.guildKey }
+    formationClaims[claim.key] = formationClaims[claim.key] or {}
+    formationClaims[claim.key][lower], formationByOwner[lower] = claim, claim
+    if winner and claim.sentAt < winner.sentAt then
+        for _, contender in pairs(formationClaims[claim.key]) do
+            if contender.sentAt > claim.sentAt + FORMATION_RACE_WINDOW then retireFormation(contender) end
+        end
+    end
+    return claim
+end
+
+-- The sender comes exclusively from GUILD transport (or our local identity).
+-- Watermarks outlive any fresh replay, are capped, and never evict live entries.
+local function applyFormation(owner, packet, now)
+    if packet.sentAt > now + 5 or now - packet.sentAt >= ns.FORMATION_TIMEOUT then return nil end
+    local entry = matchupByKey[packet.matchupKey]
+    if not entry or not currentMatchup(entry.group, now) or not entry.members[owner:lower()] then return nil end
+    local lower = owner:lower()
+    local previous = formationWatermarks[lower]
+    local active = formationByOwner[lower]
+    if packet.kind == "U" and active and active.claimID == packet.claimID and active.key == packet.matchupKey then
+        retireFormation(active)
+    end
+    if previous and packet.claimID < previous.claimID then return nil end
+    if previous and packet.claimID == previous.claimID then
+        if previous.key ~= packet.matchupKey then return nil end
+        if packet.kind == "U" then previous.released = true return nil end
+        if previous.released or previous.sentAt ~= packet.sentAt then return nil end
+        return active and active.claimID == packet.claimID and active or nil
+    end
+    if not previous and formationWatermarkCount >= FORMATION_CACHE_LIMIT then return nil end
+    local watermark = { claimID = packet.claimID, key = packet.matchupKey, sentAt = packet.sentAt,
+        released = packet.kind == "U", expiresAt = math.max(now, packet.sentAt) + ns.FORMATION_TIMEOUT + 5 }
+    formationWatermarks[lower] = watermark
+    if not previous then formationWatermarkCount = formationWatermarkCount + 1 end
+    if packet.kind == "U" then return nil end
+    -- A new token cannot silently renew a live window. A second explicit
+    -- click after a failed submission names the retired token it replaces,
+    -- so reordered/lost release packets cannot unlock its successful retry.
+    -- Non-overlapping windows also tolerate small peer clock differences.
+    if active and not active.released and active.deadline > now and packet.sentAt < active.deadline
+        and packet.replacesID ~= active.claimID then
+        watermark.released = true
+        return nil
+    end
+    if active then retireFormation(active) end
+    local claim = activateFormation(owner, packet, entry)
+    if not claim then watermark.released = true end
+    return claim
+end
+
+local function releaseFormation(claim)
+    if not claim or claim.releaseQueued or claim.guildKey ~= ns.guildKey then return end
+    retireFormation(claim)
+    if claim.deadline <= GetServerTime() then return end
+    claim.releaseQueued = true
+    if #pendingFormationReleases >= 5 then table.remove(pendingFormationReleases, 1) end
+    pendingFormationReleases[#pendingFormationReleases + 1] = { kind = "U", sentAt = GetServerTime(),
+        claimID = claim.claimID, matchupKey = claim.key, expiresAt = claim.deadline }
+end
+
+local function actionMatchup(subject)
+    local now = GetServerTime()
+    local entry = currentMatchup(subject, now)
+    local own = ns.playerName and currentMatchup(ns.playerName, now)
+    if entry and entry == own then return entry end
+end
+
+local function formationActionDisabledReason(subject)
+    local reason, status = ns.FormationDisabledReason(subject)
+    if reason then return reason end
+    if not actionMatchup(subject) or (status and status.isOwner) then return nil end
+    local remaining = 5 - (GetTime() - lastFormationFailure)
+    if remaining > 0 then
+        return "Matchup announcement could not be sent. Retry in " .. math.ceil(remaining) .. "s."
+    end
+    if safeCall(C_ChatInfo and C_ChatInfo.InChatMessagingLockdown) == true then
+        return "Addon messaging is restricted. Wait until your matchup invitation can be announced."
+    end
+end
+
+local function beginFormation(subject)
+    local reason = formationActionDisabledReason(subject)
+    if reason then return nil, false, reason end
+    local entry = actionMatchup(subject)
+    if not entry then return nil, false end
+    local winner = formationWinner(entry, GetServerTime())
+    if winner and winner.owner:lower() == ns.playerName:lower() then return winner, false end
+    pruneFormations(GetServerTime())
+    local previous = formationWatermarks[ns.playerName:lower()]
+    local replacesID = previous and previous.key == entry.key and previous.released and previous.claimID or 0
+    local packet = { kind = "F", sentAt = GetServerTime(), claimID = nextRevision(), matchupKey = entry.key,
+        replacesID = replacesID }
+    -- Install before sending: a synchronous delivery may introduce a competing
+    -- claim while SendAddonMessage is on the stack. This is not an atomic lock.
+    local claim = applyFormation(ns.playerName, packet, GetServerTime())
+    if not claim then return nil, false, "Matchup coordination is unavailable. Wait for the queue to refresh." end
+    lastAttempt = GetTime() -- Urgent clicks may bypass the background one-message/second limit.
+    if not send(ns.Protocol.Encode(packet)) then
+        lastFormationFailure = GetTime()
+        releaseFormation(claim)
+        return nil, false, "Matchup announcement could not be sent. No invitations were requested; retry in 5s."
+    end
+    local status = ns.FormationStatus(subject)
+    if not status or not status.isOwner or status.key ~= claim.key or claim.guildKey ~= ns.guildKey then
+        releaseFormation(claim)
+        return nil, false, ns.FormationDisabledReason(subject) or "This suggested matchup changed. Try again."
+    end
+    return claim, true
 end
 
 -- Dungeon recruitment needs a normal home party. Quests can additionally
@@ -379,16 +637,11 @@ function ns.CreatePartyDisabledReason(group)
     if not ns.IsReady() then
         return "Your guild queue is not ready yet."
     end
-    local current = false
-    for _, suggestion in ipairs(ns.groups) do
-        if suggestion == group then
-            current = true
-            break
-        end
-    end
-    if not current then
+    if not matchupByGroup[group] then
         return "This suggested group has changed. Wait for the queue to refresh."
     end
+    local formationReason = ns.FormationDisabledReason(group)
+    if formationReason then return formationReason end
     local includesPlayer, names, records = false, {}, {}
     local now = GetServerTime()
     if type(group.members) ~= "table" or #group.members < 2 or #group.members > #ns.SLOTS then
@@ -461,6 +714,8 @@ function ns.CreatePartyDisabledReason(group)
             return "You do not have permission to invite players to this group.", nil, true
         end
     end
+    local coordinationReason = formationActionDisabledReason(group)
+    if coordinationReason then return coordinationReason, nil, homeGroup end
     if GetTime() - lastPartyInviteAt < 5 then
         return "Invitations were just requested. Wait a few seconds before trying again.", nil, homeGroup
     end
@@ -475,8 +730,20 @@ end
 -- Called only by the explicit group-action click, never by matching or timers.
 -- Snapshot once: a party may appear after the first request in this batch.
 function ns.CreateParty(group)
+    updateGuild()
     local reason, targets = ns.CreatePartyDisabledReason(group)
     if reason then
+        printMessage(reason)
+        ns.RefreshUI()
+        return false
+    end
+    local claim, isNew
+    claim, isNew, reason = beginFormation(group)
+    if not reason and not claim then reason = "This suggested matchup changed. Wait for the queue to refresh." end
+    -- Announcement delivery can synchronously change queue or native party state.
+    if not reason then reason, targets = ns.CreatePartyDisabledReason(group) end
+    if reason then
+        if isNew then releaseFormation(claim) end
         printMessage(reason)
         ns.RefreshUI()
         return false
@@ -484,11 +751,13 @@ function ns.CreateParty(group)
     lastPartyInviteAt = GetTime()
     local requested = 0
     for _, name in ipairs(targets) do
+        if ns.FormationDisabledReason(group) or ns.MatchupKey(group) ~= claim.key
+            or not ns.IsReady() or not ns.queued or ns.QueueUpdatePending() then break end
         lastMemberInviteAt[name:lower()] = GetTime()
-        if pcall(C_PartyInfo.InviteUnit, name) then
-            requested = requested + 1
-        end
+        local ok, result = pcall(C_PartyInfo.InviteUnit, name)
+        if ok and result ~= false then requested = requested + 1 end
     end
+    if isNew and requested == 0 then releaseFormation(claim) end
     if requested == #targets then
         printMessage("Party invitations requested. Players must accept; leave the queue when finished forming your party.")
     else
@@ -511,6 +780,8 @@ function ns.SetQueued(wanted)
         ns.queued = true
         printMessage("Queue requested. Use Create party or Invite Others on your suggested group to invite its missing members.")
     else
+        local claim = ns.playerName and formationByOwner[ns.playerName:lower()]
+        releaseFormation(claim)
         ns.queued, ns.joinedAt = false, nil
         -- Withdraw locally immediately, even if transport is currently blocked.
         ns.state.records[ns.playerName or ""] = nil
@@ -567,6 +838,8 @@ local function applyGuildIdentity(guildName, guildRealm)
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
         presence, guildMembers, lastMemberInviteAt = {}, {}, {}
         pendingRoleNotices, receivedRoleNotices = {}, {}
+        formationClaims, formationByOwner, formationWatermarks, pendingFormationReleases = {}, {}, {}, {}
+        formationWatermarkCount, lastFormationFailure = 0, -100
         ns.questing = ns.Questing.New()
         questBatch, questBatchSignature, questSentSignature = nil, nil, nil
         questStopPending, localDirty = false, true
@@ -580,7 +853,7 @@ local function applyGuildIdentity(guildName, guildRealm)
     end
 end
 
-local function updateGuild(clearIfUnresolved)
+updateGuild = function(clearIfUnresolved)
     if not ns.playerName then
         identifyPlayer()
     end
@@ -665,6 +938,8 @@ function ns.QuestInviteDisabledReason(name)
     if target:lower() == ns.playerName:lower() then
         return "You cannot invite your own character.", target, true
     end
+    local formationReason = formationActionDisabledReason(target)
+    if formationReason then return formationReason, target end
     local member = guildMembers[target:lower()]
     if not member or localZoneName == "" or member.area ~= localZoneName then
         return "The guild roster cannot confirm this member is online in your zone. Try refreshing the Guild window."
@@ -680,6 +955,8 @@ function ns.QueueInviteDisabledReason(name, requestedRole)
     if target:lower() == ns.playerName:lower() then
         return "You cannot invite your own character.", target, true
     end
+    local formationReason = formationActionDisabledReason(target)
+    if formationReason then return formationReason, target end
     local snapshot, reason = actualPartyMembers()
     if not snapshot then return reason, target end
     if snapshot.present[target:lower()] then
@@ -712,9 +989,23 @@ function ns.QueueInviteDisabledReason(name, requestedRole)
 end
 
 -- Called only after the explicit click has revalidated its target.
-local function requestMemberInvite(target, requestedRole)
+local function requestMemberInvite(target, requestedRole, questInvite)
+    local claim, isNew, reason = beginFormation(target)
+    -- Revalidate after the synchronous announcement, including foreign winners.
+    if not reason then
+        if questInvite then reason = ns.QuestInviteDisabledReason(target)
+        else reason = ns.QueueInviteDisabledReason(target, requestedRole) end
+    end
+    if reason then
+        if isNew then releaseFormation(claim) end
+        printMessage(reason)
+        ns.RefreshUI()
+        return false
+    end
     lastMemberInviteAt[target:lower()] = GetTime()
-    local requested = pcall(C_PartyInfo.InviteUnit, target)
+    local ok, result = pcall(C_PartyInfo.InviteUnit, target)
+    local requested = ok and result ~= false
+    if not requested and isNew then releaseFormation(claim) end
     if requested and requestedRole then
         -- A bounded, short-lived informational outbox, not a reservation or
         -- role agreement. Old addon versions safely ignore this optional packet.
@@ -759,11 +1050,11 @@ function ns.InviteQuestingPlayer(name)
         ns.RefreshUI()
         return false
     end
-    return requestMemberInvite(target)
+    return requestMemberInvite(target, nil, true)
 end
 
-local function send(message)
-    if C_ChatInfo.InChatMessagingLockdown and C_ChatInfo.InChatMessagingLockdown() then
+send = function(message)
+    if safeCall(C_ChatInfo and C_ChatInfo.InChatMessagingLockdown) == true then
         transportError = "Addon messaging is restricted right now; retrying when allowed."
         return false
     end
@@ -803,7 +1094,7 @@ local function sendState()
     return false
 end
 
-local function nextRevision()
+nextRevision = function()
     ns.prefs.revision = math.max(ns.prefs.revision, GetServerTime() * 1000) + 1
     return ns.prefs.revision
 end
@@ -854,6 +1145,7 @@ local function tick()
     if restrictRoles() then ns.PreferencesChanged() end
     if localDirty or clock - lastLocalScan >= ns.HEARTBEAT then scanLocalQuests() end
     local serverNow = GetServerTime()
+    pruneFormations(serverNow)
     ns.questing:Prune(serverNow)
     if ns.state:Prune(serverNow) then
         rebuild()
@@ -880,10 +1172,14 @@ local function tick()
     while pendingRoleNotices[1] and serverNow - pendingRoleNotices[1].sentAt >= 30 do
         table.remove(pendingRoleNotices, 1)
     end
-    -- At most one outgoing message per second; failures back off for five seconds.
+    -- Background traffic stays at one message/second; failures back off five.
+    -- Only an explicit click's urgent F can bypass this scheduler.
     local interval = transportError and 5 or 1
     if clock - lastAttempt >= interval then
-        if pendingStateAt and pendingStateAt <= clock then
+        if pendingFormationReleases[1] then
+            lastAttempt = clock
+            if send(ns.Protocol.Encode(pendingFormationReleases[1])) then table.remove(pendingFormationReleases, 1) end
+        elseif pendingStateAt and pendingStateAt <= clock then
             lastAttempt = clock
             sendState()
         elseif questStopPending then
@@ -938,6 +1234,12 @@ local function receive(prefix, message, channel, sender)
     end
     local packet = ns.Protocol.Decode(message)
     if not packet then
+        return
+    end
+    if packet.kind == "F" or packet.kind == "U" then
+        pruneFormations(now)
+        applyFormation(name, packet, now)
+        ns.RefreshUI()
         return
     end
     if packet.kind == "R" then

@@ -152,7 +152,7 @@ end
 
 local function showQuestInviteTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Invite")
+    GameTooltip:SetText(control.actionLabel or "Invite")
     GameTooltip:AddLine(ns.QuestInviteDisabledReason(control.memberName)
         or "Invite this guild member to your party. They must accept.", 1, 1, 1, true)
     GameTooltip:Show()
@@ -446,9 +446,18 @@ local function renderGroup(group, index, own, y)
         if control.group ~= group then hideTooltip(control) end
         control.group = group
         local reason, _, existingParty = ns.CreatePartyDisabledReason(group)
-        control.actionLabel = existingParty and "Invite Others" or "Create party"
+        local formation = ns.FormationStatus(group)
+        local forming = formation and not formation.isOwner
+        control.actionLabel = forming and "Forming..." or existingParty and "Invite Others" or "Create party"
         control:SetText(control.actionLabel)
-        if existingParty then card.note:SetText("Invite only suggested members not already in your party.") end
+        if forming then
+            local formingReason = ns.FormationDisabledReason(group)
+            card.note:SetText(formingReason)
+        elseif existingParty then
+            card.note:SetText("Invite only suggested members not already in your party.")
+        elseif formation then
+            card.note:SetText("You are inviting this matchup. Others are paused for " .. formation.remaining .. "s.")
+        end
         control:SetEnabled(reason == nil)
         control:Show()
         paint(control)
@@ -567,8 +576,11 @@ local function renderRoleList()
             end
             card.invite.memberName, card.invite.requestedRole = player.name, role
             local disabled, _, inParty = ns.QueueInviteDisabledReason(player.name, role)
+            local formation = ns.FormationStatus(player.name)
+            inParty = inParty or entry.inParty
             card.invite.actionLabel = player.name == ns.playerName and "You"
-                or inParty and "In party" or ("Invite as " .. ns.ROLE_NAMES[role])
+                or inParty and "In party" or formation and not formation.isOwner and "Forming..."
+                or ("Invite as " .. ns.ROLE_NAMES[role])
             card.invite:SetText(card.invite.actionLabel)
             card.invite:SetEnabled(disabled == nil)
             paint(card.invite)
@@ -614,7 +626,9 @@ local function renderQuesting()
         card.member = member
         card.invite.memberName = member.name
         local reason, _, inParty = ns.QuestInviteDisabledReason(member.name)
-        card.invite:SetText(inParty and "In party" or "Invite")
+        local formation = ns.FormationStatus(member.name)
+        card.invite.actionLabel = inParty and "In party" or formation and not formation.isOwner and "Forming..." or "Invite"
+        card.invite:SetText(card.invite.actionLabel)
         card.invite:SetEnabled(reason == nil)
         paint(card.invite)
         card.name:SetText(ns.SafeText(member.name))

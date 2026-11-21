@@ -124,6 +124,25 @@ test("optional requested-role notices round trip and reject malformed targets ro
     end
 end)
 
+test("formation start and release packets round trip within the unchanged message size limit", function()
+    for _, kind in ipairs({ "F", "U" }) do
+        local text = ns.Protocol.Encode({ kind = kind, sentAt = 1000, claimID = 9007199254740990,
+            matchupKey = "0123456789abcdef" })
+        assert(#text <= 255)
+        local p = ns.Protocol.Decode(text)
+        equal(p.kind, kind) equal(p.sentAt, 1000) equal(p.claimID, 9007199254740990)
+        equal(p.matchupKey, "0123456789abcdef")
+    end
+end)
+test("formation packets reject invalid timestamps tokens fingerprints and extra fields", function()
+    for _, text in ipairs({ "1|F|0|1|0123456789abcdef|0", "1|F|1000|0|0123456789abcdef|0",
+        "1|U|1000|9007199254740991|0123456789abcdef", "1|F|1000|1|0123456789abcdeF|0",
+        "1|F|1000|1|0123456789abcde|0", "1|U|1000|1|0123456789abcdef|extra", "2|F|1000|1|0123456789abcdef|0",
+        "1|F|1000|2|0123456789abcdef|bad", "1|F|1000|2|0123456789abcdef|2", "1|F|1000|2|0123456789abcdef|-1" }) do
+        assert(ns.Protocol.Decode(text) == nil, text)
+    end
+end)
+
 -- Versioning, leases, tombstones and membership.
 test("out of order and duplicate messages cannot change the live queue", function()
     local state = ns.State.New()
@@ -604,6 +623,369 @@ local function suggestedPartial(c, count)
     assert(not c.ns.groups[1].slots[1])
     return c.ns.groups[1]
 end
+
+local function formationClients(count)
+    local names, roles, roster, rosterInfo = { "Alpha", "Bravo", "Charlie", "Delta", "Echo" }, { 1, 2, 4, 4, 4 }, {}, {}
+    for index = 1, count do
+        roster[index] = names[index] .. "-TestRealm"
+        rosterInfo[roster[index]] = { area = "Elwynn Forest" }
+    end
+    local clients, packets = {}, {}
+    for index = 1, count do
+        local c = client({ characterName = names[index], roster = roster, rosterInfo = rosterInfo,
+            saved = { roles = roles[index], dungeons = { [1] = true } } })
+        c.ns.SetQueued(true)
+        c:advance(1)
+        clients[index] = c
+        for _, message in ipairs(c.sent) do
+            local p = c.ns.Protocol.Decode(message.text)
+            if p.kind == "S" then packets[index] = p end
+        end
+    end
+    for _, c in ipairs(clients) do
+        for index, sender in ipairs(clients) do
+            if c ~= sender then c:receive(sender.ns.playerName, packets[index]) end
+        end
+        equal(#c.ns.groups, 1)
+        equal(#c.ns.groups[1].members, count)
+    end
+    return clients
+end
+local function relayFormations(clients)
+    for _, c in ipairs(clients) do
+        local sender, original = c, c.env.C_ChatInfo.SendAddonMessage
+        c.env.C_ChatInfo.SendAddonMessage = function(prefix, text, channel)
+            local result = original(prefix, text, channel)
+            local p = sender.ns.Protocol.Decode(text)
+            if result == 0 and p and (p.kind == "F" or p.kind == "U") then
+                for _, peer in ipairs(clients) do
+                    if peer ~= sender then peer:fire("CHAT_MSG_ADDON", prefix, text, channel, sender.ns.playerName) end
+                end
+            end
+            return result
+        end
+    end
+end
+local function advanceFormations(clients, seconds)
+    for _ = 1, seconds do for _, c in ipairs(clients) do c:advance(1) end end
+end
+local function lastFormation(c, kind)
+    for index = #c.sent, 1, -1 do
+        local p = c.ns.Protocol.Decode(c.sent[index].text)
+        if p and p.kind == kind then return p end
+    end
+end
+
+test("formation announcement disables peer actions before the first native invitation is submitted", function()
+    local clients = formationClients(5)
+    local a, b = clients[1], clients[2]
+    relayFormations(clients)
+    local native = a.env.C_PartyInfo.InviteUnit
+    a.env.C_PartyInfo.InviteUnit = function(name)
+        assert(b.ns.CreatePartyDisabledReason(b.ns.groups[1]):find("Alpha", 1, true))
+        assert(b.ns.QueueInviteDisabledReason("Charlie-TestRealm", 4))
+        assert(b.ns.QuestInviteDisabledReason("Charlie-TestRealm"))
+        native(name)
+    end
+    assert(a.ns.CreateParty(a.ns.groups[1]))
+    equal(#a.invites, 4)
+    equal(#b.invites, 0)
+    assert(not b.ns.CreateParty(b.ns.groups[1]))
+    assert(not b.ns.InviteQueuedPlayer("Charlie-TestRealm", 4))
+    assert(not b.ns.InviteQuestingPlayer("Charlie-TestRealm"))
+    equal(#b.invites, 0)
+    local status = b.ns.FormationStatus(b.ns.groups[1])
+    equal(status.owner, a.ns.playerName) equal(status.remaining, 30) assert(not status.isOwner)
+    equal(b.ns.FormationStatus("Charlie-TestRealm").key, status.key)
+    equal(b.ns.state.records[a.ns.playerName].roles, 1)
+end)
+test("formation fingerprints ignore heartbeats and member iteration order and remain bounded", function()
+    local clients = formationClients(5)
+    local a, b = clients[1], clients[2]
+    local key = a.ns.MatchupKey(a.ns.groups[1])
+    equal(#key, 16)
+    equal(key, b.ns.MatchupKey(b.ns.groups[1]))
+    local group = a.ns.groups[1]
+    group.members[1], group.members[5] = group.members[5], group.members[1]
+    equal(a.ns.MatchupKey(group), key)
+    group.members[1], group.members[5] = group.members[5], group.members[1]
+    advanceFormations(clients, 21)
+    equal(a.ns.MatchupKey(a.ns.groups[1]), key)
+    equal(b.ns.MatchupKey(b.ns.groups[1]), key)
+    a.ns.state.records["Charlie-TestRealm"].roles = 6
+    equal(a.ns.MatchupKey(group), nil) -- Semantic preference changes invalidate the old fingerprint.
+end)
+test("formation expiry reenables peers without renewing on duplicate announcements or heartbeats", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    relayFormations(clients)
+    assert(a.ns.CreateParty(a.ns.groups[1]))
+    local start = lastFormation(a, "F")
+    advanceFormations(clients, 6)
+    assert(a.ns.CreateParty(a.ns.groups[1])) -- Owner may retry under native guards/cooldowns.
+    equal(lastFormation(a, "F").claimID, start.claimID)
+    advanceFormations(clients, 15)
+    b:receive(a.ns.playerName, start)
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 9)
+    advanceFormations(clients, 9)
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    assert(b.ns.CreatePartyDisabledReason(b.ns.groups[1]) == nil)
+    equal(#b.invites, 0)
+end)
+test("new tokens from an already active inviter cannot renew the invitation window", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    local key = b.ns.MatchupKey(b.ns.groups[1])
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 100, matchupKey = key })
+    advanceFormations(clients, 4)
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 101, matchupKey = key })
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 26)
+    advanceFormations(clients, 26)
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now - 26, claimID = 101, matchupKey = key })
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil) -- Expiry alone never promotes a held start.
+end)
+
+test("formation protection applies to full partial and same-match individual invitations", function()
+    for count = 2, 5 do
+        local clients = formationClients(count)
+        local a, b = clients[1], clients[2]
+        relayFormations(clients)
+        assert(a.ns.InviteQueuedPlayer(b.ns.playerName, 2))
+        equal(#a.invites, 1)
+        assert(lastFormation(a, "F"))
+        assert(not b.ns.CreateParty(b.ns.groups[1]))
+        equal(#b.invites, 0)
+    end
+end)
+test("match announcements require a fresh participant exact fingerprint and the guild channel", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    local key = b.ns.MatchupKey(b.ns.groups[1])
+    local p = { kind = "F", sentAt = b.now, claimID = 10, matchupKey = key }
+    b:receive("Outsider-TestRealm", p)
+    b:receive(a.ns.playerName, p, "WHISPER")
+    b:receive(a.ns.playerName, p, "GUILD", "OtherAddon")
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now - 30, claimID = 10, matchupKey = key })
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now + 6, claimID = 10, matchupKey = key })
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 10, matchupKey = "0123456789abcdef" })
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    b:receive(a.ns.playerName, p)
+    assert(b.ns.FormationStatus(b.ns.groups[1]))
+    equal(#b.invites, 0)
+end)
+test("a claim only blocks its matchup while unrelated groups remain free to form", function()
+    local clients = formationClients(5)
+    local a = clients[1]
+    a.ns.prefs.dungeons = { [1] = true, [2] = true }
+    a.ns.PreferencesChanged()
+    a:advance(1)
+    a:receive("OtherHealer-TestRealm", packet(1, 2, { [2] = true }, a.now, a.now))
+    a:receive("OtherDamage-TestRealm", packet(1, 4, { [2] = true }, a.now, a.now))
+    equal(#a.ns.groups, 2)
+    local own, other = a.ns.groups[1], a.ns.groups[2]
+    equal(#own.members, 5) equal(#other.members, 2)
+    assert(a.ns.QueueInviteDisabledReason("OtherDamage-TestRealm", 4) == nil)
+    a:receive("OtherHealer-TestRealm", { kind = "F", sentAt = a.now, claimID = 200,
+        matchupKey = a.ns.MatchupKey(other) })
+    assert(a.ns.CreatePartyDisabledReason(own) == nil)
+    equal(a.ns.FormationStatus(own), nil)
+    assert(a.ns.QueueInviteDisabledReason("OtherDamage-TestRealm", 4):find("OtherHealer", 1, true))
+    assert(not a.ns.InviteQueuedPlayer("OtherDamage-TestRealm", 4))
+    equal(#a.invites, 0)
+end)
+
+test("only the authenticated owner token releases a claim and release-before-start prevents replay", function()
+    local clients = formationClients(3)
+    local a, b, c = clients[1], clients[2], clients[3]
+    local key = b.ns.MatchupKey(b.ns.groups[1])
+    local p = { kind = "F", sentAt = b.now, claimID = 100, matchupKey = key }
+    b:receive(a.ns.playerName, p)
+    b:receive(c.ns.playerName, { kind = "U", sentAt = b.now, claimID = 100, matchupKey = key })
+    equal(b.ns.FormationStatus(b.ns.groups[1]).owner, a.ns.playerName)
+    b:receive(a.ns.playerName, { kind = "U", sentAt = b.now, claimID = 99, matchupKey = key })
+    assert(b.ns.FormationStatus(b.ns.groups[1]))
+    b:receive(a.ns.playerName, { kind = "U", sentAt = b.now, claimID = 100, matchupKey = key })
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    b:receive(a.ns.playerName, p)
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    b:receive(a.ns.playerName, { kind = "U", sentAt = b.now, claimID = 101, matchupKey = key })
+    b:receive(a.ns.playerName, { kind = "F", sentAt = b.now, claimID = 101, matchupKey = key })
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    equal(#b.invites, 0)
+end)
+test("failed announcements block native requests and retry only after another explicit click", function()
+    for _, failure in ipairs({ "locked", "rejected" }) do
+        local clients = formationClients(2)
+        local a, b = clients[1], clients[2]
+        relayFormations(clients)
+        if failure == "locked" then a.locked = true else a.result = 11 end
+        assert(not a.ns.CreateParty(a.ns.groups[1]))
+        equal(#a.invites, 0)
+        equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+        advanceFormations(clients, 6)
+        equal(#a.invites, 0)
+        a.locked, a.result = false, 0
+        advanceFormations(clients, 6)
+        equal(#a.invites, 0)
+        assert(a.ns.CreateParty(a.ns.groups[1]))
+        equal(#a.invites, 1)
+        assert(b.ns.FormationStatus(b.ns.groups[1]))
+    end
+end)
+test("all native failures release a new claim but partial success keeps the invitation window", function()
+    local clients = formationClients(3)
+    local a, b = clients[1], clients[2]
+    relayFormations(clients)
+    a.env.C_PartyInfo.InviteUnit = function() error("Native request rejected") end
+    assert(not a.ns.CreateParty(a.ns.groups[1]))
+    assert(b.ns.FormationStatus(b.ns.groups[1]))
+    advanceFormations(clients, 1)
+    assert(lastFormation(a, "U"))
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    local partial = formationClients(3)
+    local owner, peer = partial[1], partial[2]
+    relayFormations(partial)
+    owner.failInvite = peer.ns.playerName
+    assert(not owner.ns.CreateParty(owner.ns.groups[1]))
+    equal(#owner.invites, 1)
+    advanceFormations(partial, 1)
+    assert(peer.ns.FormationStatus(peer.ns.groups[1]))
+    assert(not lastFormation(owner, "U"))
+end)
+test("a failed first individual invite cannot unlock a successful replacement when releases arrive out of order", function()
+    for _, order in ipairs({ "startsFirst", "releaseFirst", "oldStartLast" }) do
+        local clients = formationClients(3)
+        local a, b = clients[1], clients[2]
+        a.failInvite = b.ns.playerName
+        assert(not a.ns.InviteQueuedPlayer(b.ns.playerName, 2))
+        local first = lastFormation(a, "F")
+        assert(a.ns.InviteQueuedPlayer("Charlie-TestRealm", 4))
+        local second = lastFormation(a, "F")
+        assert(second.claimID > first.claimID)
+        equal(second.replacesID, first.claimID)
+        a:advance(1)
+        local release = lastFormation(a, "U")
+        equal(release.claimID, first.claimID)
+        local packets = order == "startsFirst" and { first, second, release }
+            or order == "releaseFirst" and { first, release, second } or { release, second, first }
+        for _, p in ipairs(packets) do b:receive(a.ns.playerName, p) end
+        assert(b.ns.FormationStatus(b.ns.groups[1]), order)
+        assert(b.ns.CreatePartyDisabledReason(b.ns.groups[1]), order)
+        b:receive(a.ns.playerName, release)
+        assert(b.ns.FormationStatus(b.ns.groups[1])) -- An old release cannot clear the replacement.
+        b:receive(a.ns.playerName, { kind = "U", sentAt = b.now, claimID = second.claimID,
+            matchupKey = second.matchupKey })
+        equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+        equal(#a.invites, 1) equal(#b.invites, 0)
+    end
+end)
+
+test("a successful retry stays protected even when the first release is lost near its expiry", function()
+    local clients = formationClients(3)
+    local a, b = clients[1], clients[2]
+    a.failInvite = b.ns.playerName
+    assert(not a.ns.InviteQueuedPlayer(b.ns.playerName, 2))
+    local first = lastFormation(a, "F")
+    b:receive(a.ns.playerName, first)
+    a.locked = true
+    advanceFormations(clients, 28)
+    a.locked = false
+    assert(a.ns.InviteQueuedPlayer("Charlie-TestRealm", 4))
+    local second = lastFormation(a, "F")
+    equal(second.replacesID, first.claimID)
+    b:receive(a.ns.playerName, second) -- Do not deliver the old release at all.
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 30)
+    b:advance(3)
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 27)
+    b:receive(a.ns.playerName, { kind = "U", sentAt = b.now, claimID = first.claimID, matchupKey = first.matchupKey })
+    assert(b.ns.FormationStatus(b.ns.groups[1]))
+    equal(#a.invites, 1) equal(#b.invites, 0)
+end)
+test("nonoverlapping fresh windows tolerate peer clock skew without treating a new click as renewal", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    local key, started = b.ns.MatchupKey(b.ns.groups[1]), b.now
+    b:receive(a.ns.playerName, { kind = "F", sentAt = started, claimID = 100, matchupKey = key })
+    a:advance(30)
+    b:advance(25)
+    b:receive(a.ns.playerName, { kind = "F", sentAt = a.now, claimID = 101, matchupKey = key })
+    equal(b.ns.FormationStatus(b.ns.groups[1]).remaining, 35) -- Five-second accepted clock tolerance.
+    b:advance(6)
+    assert(b.ns.FormationStatus(b.ns.groups[1]))
+    equal(#a.invites, 0) equal(#b.invites, 0)
+end)
+test("an explicitly released failed replacement never revives when its start arrives late", function()
+    local clients = formationClients(3)
+    local a, b = clients[1], clients[2]
+    a.env.C_PartyInfo.InviteUnit = function() return false end
+    assert(not a.ns.InviteQueuedPlayer(b.ns.playerName, 2))
+    local first = lastFormation(a, "F")
+    assert(not a.ns.InviteQueuedPlayer("Charlie-TestRealm", 4))
+    local second = lastFormation(a, "F")
+    a:advance(2)
+    local releases = {}
+    for _, message in ipairs(a.sent) do
+        local p = a.ns.Protocol.Decode(message.text)
+        if p and p.kind == "U" then releases[p.claimID] = p end
+    end
+    for _, p in ipairs({ first, releases[second.claimID], second, releases[first.claimID] }) do
+        assert(p)
+        b:receive(a.ns.playerName, p)
+    end
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    equal(#a.invites, 0) equal(#b.invites, 0)
+end)
+
+test("an explicit failed retry cannot release an existing claim with outstanding earlier requests", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    relayFormations(clients)
+    assert(a.ns.CreateParty(a.ns.groups[1]))
+    advanceFormations(clients, 6)
+    a.env.C_PartyInfo.InviteUnit = function() return false end
+    assert(not a.ns.CreateParty(a.ns.groups[1]))
+    assert(b.ns.FormationStatus(b.ns.groups[1]))
+    assert(not lastFormation(a, "U"))
+end)
+test("queue withdrawal guild changes and semantic matchup changes remove obsolete invitation locks", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    relayFormations(clients)
+    assert(a.ns.CreateParty(a.ns.groups[1]))
+    a.ns.SetQueued(false)
+    advanceFormations(clients, 1)
+    assert(lastFormation(a, "U"))
+    equal(b.ns.FormationStatus(b.ns.groups[1]), nil)
+    local changed = formationClients(2)
+    local owner, peer = changed[1], changed[2]
+    relayFormations(changed)
+    assert(owner.ns.CreateParty(owner.ns.groups[1]))
+    local old = lastFormation(owner, "F")
+    peer:receive(owner.ns.playerName, packet(old.claimID + 1, 4, { [2] = true }, owner.ns.joinedAt, peer.now))
+    equal(peer.ns.FormationStatus(peer.ns.playerName), nil)
+    peer:receive(owner.ns.playerName, old)
+    equal(peer.ns.FormationStatus(peer.ns.playerName), nil)
+    peer.guild = "Another Guild"
+    peer:fire("PLAYER_GUILD_UPDATE", "player")
+    equal(peer.ns.FormationStatus(peer.ns.playerName), nil)
+    equal(#peer.invites, 0)
+end)
+test("simultaneous clicks converge deterministically without pretending to undo native requests", function()
+    local clients = formationClients(2)
+    local a, b = clients[1], clients[2]
+    assert(a.ns.CreateParty(a.ns.groups[1]))
+    assert(b.ns.CreateParty(b.ns.groups[1])) -- Neither announcement has arrived yet.
+    local pa, pb = lastFormation(a, "F"), lastFormation(b, "F")
+    a:receive(b.ns.playerName, pb)
+    b:receive(a.ns.playerName, pa)
+    equal(a.ns.FormationStatus(a.ns.groups[1]).owner, a.ns.playerName)
+    equal(b.ns.FormationStatus(b.ns.groups[1]).owner, a.ns.playerName)
+    equal(#a.invites, 1) equal(#b.invites, 1)
+    assert(not b.ns.CreateParty(b.ns.groups[1]))
+    advanceFormations(clients, 31)
+    equal(#a.invites, 1) equal(#b.invites, 1)
+end)
 
 test("partial Create party requests only the other one to three matched players", function()
     for size = 2, 4 do
@@ -2167,6 +2549,68 @@ test("dungeon labels show ranges and filling guidance never tells users to withd
     end
     equal(dungeons, #c.ns.DUNGEONS)
     assert(guidance)
+end)
+
+test("formation receipt updates group and role-list buttons immediately and expiry restores them", function()
+    local clients = formationClients(3)
+    local a, b = clients[1], clients[2]
+    local widgets, views = roleListUI(b)
+    views.default.scripts.OnClick(views.default)
+    local action, card
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "party" and widget.shown then action = widget end
+        if widget.guildQueueKind == "group" and widget.shown and widget.createParty then card = widget end
+    end
+    assert(action and card and action.enabled)
+    action.scripts.OnEnter(action)
+    relayFormations(clients)
+    assert(a.ns.CreateParty(a.ns.groups[1]))
+    assert(not action.enabled)
+    equal(action.text, "Forming...")
+    assert(card.note.text:find("Alpha", 1, true))
+    assert(b.tooltip.text:find("30s", 1, true))
+    action.scripts.OnClick(action)
+    equal(#b.invites, 0)
+    views.roles.scripts.OnClick(views.roles)
+    local recruit
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "rolePlayer" and widget.shown and widget.player.name == "Charlie-TestRealm" then recruit = widget end
+    end
+    assert(recruit and not recruit.invite.enabled)
+    equal(recruit.invite.text, "Forming...")
+    recruit.invite.scripts.OnEnter(recruit.invite)
+    assert(b.tooltip.text:find("Alpha", 1, true))
+    advanceFormations(clients, 30)
+    assert(recruit.invite.enabled)
+    equal(recruit.invite.text, "Invite as Damage")
+    views.default.scripts.OnClick(views.default)
+    assert(action.enabled)
+    equal(action.text, "Create party")
+    equal(#b.invites, 0)
+end)
+test("same-zone invite controls respect a matchup lock and recover after an authenticated release", function()
+    local clients = formationClients(3)
+    local a, b = clients[1], clients[2]
+    local widgets = openUI(b)
+    local quests
+    for _, widget in ipairs(widgets) do if widget.mainTab and widget.mode == "questing" then quests = widget end end
+    quests.scripts.OnClick(quests)
+    local invite
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "questMember" and widget.member.name == "Charlie-TestRealm" then invite = widget.invite end
+    end
+    assert(invite and invite.enabled)
+    relayFormations(clients)
+    a.env.C_PartyInfo.InviteUnit = function() error("Failed native submission") end
+    assert(not a.ns.CreateParty(a.ns.groups[1]))
+    assert(not invite.enabled)
+    equal(invite.text, "Forming...")
+    invite.scripts.OnEnter(invite)
+    assert(b.tooltip.text:find("Alpha", 1, true))
+    advanceFormations(clients, 1)
+    assert(invite.enabled)
+    equal(invite.text, "Invite")
+    equal(#b.invites, 0)
 end)
 
 test("Role List text fits its cards toolbar and native view selectors", function()

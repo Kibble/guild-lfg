@@ -44,6 +44,12 @@ function Protocol.Encode(packet)
     if packet.kind == "H" or packet.kind == "P" then
         return "1|" .. packet.kind
     end
+    if packet.kind == "F" or packet.kind == "U" then
+        local parts = { "1", packet.kind, string.format("%.0f", packet.sentAt),
+            string.format("%.0f", packet.claimID), packet.matchupKey }
+        if packet.kind == "F" then parts[6] = string.format("%.0f", packet.replacesID or 0) end
+        return table.concat(parts, "|")
+    end
     if packet.kind == "R" then
         return table.concat({ "1", "R", string.format("%.0f", packet.sentAt),
             tostring(packet.role), packet.target }, "|")
@@ -73,6 +79,17 @@ function Protocol.Decode(message)
         return nil
     end
     local kind = fields[2]
+    if kind == "F" or kind == "U" then
+        local sentAt = integer(fields[3], 1, 9999999999)
+        local claimID = integer(fields[4], 1, 9007199254740990)
+        local key = fields[5]
+        local replacesID = 0
+        if kind == "F" then replacesID = integer(fields[6], 0, 9007199254740990) end
+        if #fields ~= (kind == "F" and 6 or 5) or not sentAt or not claimID or type(key) ~= "string"
+            or #key ~= 16 or key:find("[^0-9a-f]") or replacesID == nil
+            or replacesID >= claimID then return nil end
+        return { kind = kind, sentAt = sentAt, claimID = claimID, matchupKey = key, replacesID = replacesID }
+    end
     if kind == "R" then
         local sentAt = integer(fields[3], 1, 9999999999)
         local role = integer(fields[4], 1, 4)

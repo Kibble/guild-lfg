@@ -1,4 +1,4 @@
-local _, ns = ...
+local addonName, ns = ...
 local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, dungeonTab, questTab
 local sidebar, queueViewStatus, defaultView, roleView, roleToolbar, roleTitle
 local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
@@ -835,7 +835,10 @@ local function createUI()
     table.insert(UISpecialFrames, "GuildQueueFrame")
 
     local header = panel(frame, 18, 18, 1024, 79, C.panel)
-    label(header, "Guild Queue", 16, 4, 385, 28, "GameFontNormalHuge", C.heading)
+    local getMetadata = C_AddOns and C_AddOns.GetAddOnMetadata
+    local version = getMetadata and getMetadata(addonName, "Version")
+    if type(version) ~= "string" or version == "" then version = "unknown" end
+    label(header, "Guild Queue (v" .. ns.SafeText(version) .. ")", 16, 4, 385, 28, "GameFontNormalHuge", C.heading)
     guildLabel = label(header, "", 16, 34, 430, 18, "GameFontNormal", C.text)
     label(header, "Guild members with addon seen in the last 75 seconds", 16, 57, 430, 16, nil, C.muted)
     for index, entry in ipairs({ { "queued", "QUEUED" }, { "groups", "GROUPS" },

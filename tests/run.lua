@@ -2640,6 +2640,43 @@ test("Role List text fits its cards toolbar and native view selectors", function
     equal(#widgets, count)
 end)
 
+test("UI title displays the running addon version from metadata rather than a hardcoded release", function()
+    local toc = assert(io.open("GuildQueue/GuildQueue.toc", "r"))
+    local installed = toc:read("*a"):match("## Version:%s*([^\r\n]+)")
+    toc:close()
+    assert(installed)
+    for _, version in ipairs({ installed, "9.8.7" }) do
+        local c, calls = client(), 0
+        c.env.C_AddOns = { GetAddOnMetadata = function(name, field)
+            equal(name, "GuildQueue") equal(field, "Version")
+            calls = calls + 1
+            return version
+        end }
+        local title
+        for _, control in ipairs(openUI(c)) do
+            if control.text == "Guild Queue (v" .. version .. ")" then title = control end
+        end
+        assert(title)
+        equal(calls, 1)
+        equal(title.template, "GameFontNormalHuge")
+        assert(title:GetWidth() > 0 and title:GetHeight() > 0)
+        c.ns.RefreshUI()
+        equal(calls, 1)
+    end
+end)
+test("UI title reports an unknown version when the metadata API or version is unavailable", function()
+    for _, metadata in ipairs({ false,
+        { GetAddOnMetadata = function() return nil end },
+        { GetAddOnMetadata = function() return "" end } }) do
+        local c, found = client(), false
+        c.env.C_AddOns = metadata or nil
+        for _, control in ipairs(openUI(c)) do
+            if control.text == "Guild Queue (vunknown)" then found = true end
+        end
+        assert(found)
+    end
+end)
+
 test("UI header displays and refreshes the recent online-addon member count", function()
     local c = client()
     local widgets = openUI(c)

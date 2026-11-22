@@ -3170,6 +3170,111 @@ test("dungeon labels show ranges and filling guidance never tells users to withd
     assert(guidance)
 end)
 
+local function nativeDungeonColors(c)
+    local colors = { normal = { 1, 0.82, 0, 1 }, trivial = { 0.5, 0.5, 0.5, 1 }, difficult = { 1, 0.5, 0.25, 1 } }
+    for name, key in pairs({ LFGActivityEntry = "normal", LFGActivityEntryTrivial = "trivial", LFGActivityEntryDifficult = "difficult" }) do
+        local color = colors[key]
+        c.env[name] = { GetTextColor = function() return unpack(color) end }
+    end
+    return colors
+end
+local function equalTextColor(control, expected)
+    assert(control and control.caption and control.caption.textColor)
+    for index = 1, 4 do equal(control.caption.textColor[index], expected[index]) end
+end
+
+test("dungeon list reproduces the native LFG three range colors at level 50", function()
+    local c = client()
+    c.level = 50
+    local colors, controls = nativeDungeonColors(c), {}
+    for _, control in ipairs(openUI(c)) do
+        if control.guildQueueKind == "dungeon" then controls[control.id] = control end
+    end
+    for _, id in ipairs({ 25, 26, 27 }) do equalTextColor(controls[id], colors.difficult) end
+    for _, id in ipairs({ 20, 21, 22, 23, 24 }) do equalTextColor(controls[id], colors.normal) end
+    for _, id in ipairs({ 1, 16, 19 }) do equalTextColor(controls[id], colors.trivial) end
+    for _, control in pairs(controls) do assert(control:IsEnabled()) end
+    -- Copy the actual native font RGBA, not a separately guessed yellow or font size.
+    colors.normal[1], colors.normal[2], colors.normal[4] = 0.93, 0.87, 0.75
+    c.ns.RefreshUI()
+    equalTextColor(controls[24], colors.normal)
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("dungeon range colors include both recommended boundaries for every catalog entry", function()
+    local c = client()
+    local colors, controls = nativeDungeonColors(c), {}
+    for _, control in ipairs(openUI(c)) do
+        if control.guildQueueKind == "dungeon" then controls[control.id] = control end
+    end
+    for _, dungeon in ipairs(c.ns.DUNGEONS) do
+        for _, case in ipairs({ { dungeon.minLevel - 1, "difficult" }, { dungeon.minLevel, "normal" },
+            { dungeon.maxLevel, "normal" }, { dungeon.maxLevel + 1, "trivial" } }) do
+            c.level = case[1]
+            c.ns.RefreshUI()
+            equalTextColor(controls[dungeon.id], colors[case[2]])
+            equal(controls[dungeon.id].caption.text, c.ns.DungeonName(dungeon))
+        end
+    end
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("level-up hover click and select-all keep difficulty colors current without filtering selections", function()
+    local c = client()
+    c.level = 50
+    local colors, controls, selectAll = nativeDungeonColors(c), {}, nil
+    for _, control in ipairs(openUI(c)) do
+        if control.guildQueueKind == "dungeon" then controls[control.id] = control end
+        if control.guildQueueKind == "selectAll" then selectAll = control end
+    end
+    c:advance(5)
+    local sent = #c.sent
+    c.level = 51
+    c:fire("PLAYER_LEVEL_UP", 51)
+    c:advance(1)
+    equalTextColor(controls[20], colors.normal)
+    c.level = 52
+    c:fire("PLAYER_LEVEL_UP", 52)
+    c:advance(1)
+    equalTextColor(controls[20], colors.trivial)
+    controls[20].scripts.OnEnter(controls[20])
+    controls[20].scripts.OnLeave(controls[20])
+    controls[20]:SetChecked(true)
+    controls[20].scripts.OnClick(controls[20])
+    equalTextColor(controls[20], colors.trivial)
+    assert(c.ns.prefs.dungeons[20])
+    selectAll.scripts.OnClick(selectAll)
+    for _, dungeon in ipairs(c.ns.DUNGEONS) do
+        assert(c.ns.prefs.dungeons[dungeon.id] and controls[dungeon.id]:GetChecked() and controls[dungeon.id]:IsEnabled())
+    end
+    equalTextColor(controls[20], colors.trivial)
+    equalTextColor(controls[26], colors.difficult)
+    equal(#c.sent, sent) equal(#c.invites, 0)
+end)
+test("unavailable invalid or restricted player levels use neutral dungeon text and recover", function()
+    for _, unavailable in ipairs({ false, function() return nil end, function() return 0 end, function() return -1 end,
+        function() return "50" end, function() return 0/0 end, function() return math.huge end,
+        function() error("Level unavailable") end, "restricted" }) do
+        local c = client()
+        local colors, dungeon = nativeDungeonColors(c), nil
+        for _, control in ipairs(openUI(c)) do
+            if control.guildQueueKind == "dungeon" and control.id == 1 then dungeon = control end
+        end
+        if unavailable == "restricted" then
+            c.env.hasanysecretvalues = function(...) return select("#", ...) == 1 and (...) == c.level end
+        else
+            c.env.UnitLevel = unavailable
+        end
+        c.ns.RefreshUI()
+        equalTextColor(dungeon, { 1, 1, 1, 1 })
+        assert(dungeon:IsEnabled())
+        c.env.hasanysecretvalues = nil
+        c.env.UnitLevel = function() return c.level end
+        c.level = 50
+        c.ns.RefreshUI()
+        equalTextColor(dungeon, colors.trivial)
+        equal(#c.sent, 0) equal(#c.invites, 0)
+    end
+end)
+
 test("formation receipt updates group and role-list buttons immediately and expiry restores them", function()
     local clients = formationClients(3)
     local a, b = clients[1], clients[2]

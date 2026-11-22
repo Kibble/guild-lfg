@@ -19,7 +19,7 @@ local C = {
     heading = { 1, 0.82, 0 }, text = { 1, 1, 1 },
     muted = { 0.65, 0.65, 0.65 }, selected = { 0.08, 0.075, 0.045 },
     green = { 0.2, 1, 0.2 }, own = { 0.055, 0.055, 0.035 },
-    dim = { 0.5, 0.5, 0.5 },
+    dim = { 0.5, 0.5, 0.5 }, difficult = { 1, 0.5, 0.25 },
 }
 local roleAtlases = { [1] = "UI-LFG-RoleIcon-Tank", [2] = "UI-LFG-RoleIcon-Healer",
     [4] = "UI-LFG-RoleIcon-DPS" }
@@ -183,6 +183,31 @@ local function showQueueTooltip(control)
     GameTooltip:Show()
 end
 
+local function paintDungeon(control)
+    local ok, level
+    if type(UnitLevel) == "function" then ok, level = pcall(UnitLevel, "player") end
+    local dungeon = ns.DUNGEON_BY_ID[control.id]
+    if not ok or (hasanysecretvalues and hasanysecretvalues(level))
+        or type(level) ~= "number" or level ~= level or level <= 0 or level > 1000
+        or not dungeon or type(dungeon.minLevel) ~= "number" or type(dungeon.maxLevel) ~= "number" then
+        colorText(control.caption, C.text)
+        return
+    end
+    -- Same range boundaries and font colors as LFGListingActivityView_InitActivityButton.
+    -- Copy only RGBA, preserving our bounded label's font size and wrapping.
+    local font, fallback = LFGActivityEntry or GameFontNormal, C.heading
+    if dungeon.maxLevel ~= 0 and dungeon.maxLevel < level then
+        font, fallback = LFGActivityEntryTrivial, C.dim
+    elseif dungeon.minLevel ~= 0 and dungeon.minLevel > level then
+        font, fallback = LFGActivityEntryDifficult, C.difficult
+    end
+    if font and font.GetTextColor then
+        control.caption:SetTextColor(font:GetTextColor())
+    else
+        colorText(control.caption, fallback)
+    end
+end
+
 local function paint(control)
     -- Native templates own their hover, pressed, checked and disabled artwork.
     if control.guildQueueKind == "scrollbar" then
@@ -193,6 +218,9 @@ local function paint(control)
             return -- Native visibility/color changes; both states share fixed geometry.
         end
         control:SetButtonState(control.selected and "PUSHED" or "NORMAL", control.selected == true)
+    elseif control.guildQueueKind == "dungeon" and control:IsEnabled() then
+        paintDungeon(control)
+        return
     end
     colorText(control.caption, control:IsEnabled() and C.heading or C.dim)
 end

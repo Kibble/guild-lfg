@@ -1,6 +1,6 @@
 # Guild Queue — WoW:Forever addon
 
-**Version 0.16.3 — compact native-sized dungeon rows; needs in-client visual and multiplayer confirmation.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
+**Version 0.16.4 — matching Select all/Join queue button heights; needs in-client visual and multiplayer confirmation.** Targets Forever interface `16001` (1.60.1). No external addon libraries or server are required.
 
 ## Screenshot
 
@@ -46,7 +46,7 @@ Players explicitly leave the queue when no longer looking. Requesting invitation
 
 ## Install
 
-[Download GuildQueue-0.16.3.zip](GuildQueue-0.16.3.zip) and extract the `GuildQueue` folder.
+[Download GuildQueue-0.16.4.zip](GuildQueue-0.16.4.zip) and extract the `GuildQueue` folder.
 
 1. Close the game client.
 2. Extract the download and copy its **`GuildQueue` folder** into your Forever installation's `Interface/AddOns` directory. The resulting file must be `Interface/AddOns/GuildQueue/GuildQueue.toc`.
@@ -61,6 +61,8 @@ Additional commands: `/gq join` uses your current selections; `/gq leave` withdr
 Use Battle.net's **Show in Explorer** to find your installation; the launch client's folder is normally `_forever_`. Other files in this download are development files and do not need to be installed.
 
 **Updating from an earlier version:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
+
+**Button sizing in 0.16.4:** Select all now matches Join queue's 34-unit height, keeping its position, width and selection behavior unchanged.
 
 **Native dungeon row layout in 0.16.3:** uses Forever's Mainline-family LFG dimensions: **22-unit rows**, **30×30 checkboxes**, four-unit list padding, and the game's native LFG font objects for both font size and difficulty color. These are UI units; existing whole-window screen fitting still applies. Checkbox artwork uses the native additive hover highlight, and hovering the name/range area highlights its checkbox too. Highlights clear on leaving, scrolling, switching views, hiding the window or hovering another control. Dungeon names are single-line and left-aligned; level ranges occupy a separate 60-unit right-aligned column. Long names stay bounded rather than overlap the range, and full names/ranges remain in hover tooltips. Clicking either the checkbox or its name/range target performs exactly one normal selection change. Scroll height/padding account for the larger checkbox extending above and below its row, keeping the first and last checkboxes reachable. Role selectors, quest sharing controls, matching, queue synchronization and click-only invitation behavior are unchanged.
 

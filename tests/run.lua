@@ -3973,10 +3973,12 @@ end)
 test("UI uses native WoW borders, buttons, checkboxes and close-button artwork", function()
     local c = client()
     local widgets = openUI(c)
-    local surfaces, buttons, checks, main, close = 0, 0, 0
+    local surfaces, buttons, checks, main, close, selectAll, join = 0, 0, 0
     for _, control in ipairs(widgets) do
         if control.frameName == "GuildQueueFrame" then main = control end
         if control.guildQueueKind == "close" then close = control end
+        if control.guildQueueKind == "selectAll" then selectAll = control end
+        if control.guildQueueKind == "queue" then join = control end
         if control.template == "UIPanelButtonTemplate" then buttons = buttons + 1 end
         if control.template == "UICheckButtonTemplate" then checks = checks + 1 end
         if control.backdrop then
@@ -3989,6 +3991,9 @@ test("UI uses native WoW borders, buttons, checkboxes and close-button artwork",
         end
     end
     assert(surfaces > 3 and main and buttons >= 5)
+    equal(selectAll:GetHeight(), join:GetHeight())
+    equal(selectAll:GetHeight(), 34)
+    assert(-selectAll.point[3] + selectAll:GetHeight() < -join.point[3])
     equal(checks, 4 + #c.ns.DUNGEONS) -- Roles, dungeons, and opt-in quest sharing.
     equal(close.template, "UIPanelCloseButton")
     equal(close.text, "") -- Native X texture, not a second text-based X.

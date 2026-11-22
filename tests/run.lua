@@ -2563,6 +2563,19 @@ local function openUI(c, keepClosed)
         if self.fontString then self.fontString.text = self.text end
     end
     function methods:SetFontString(fontString) self.fontString = fontString end
+    function methods:SetFontObject(font)
+        self.fontObject, self.justifyH = font, "LEFT" -- Native LFG fonts inherit left alignment.
+    end
+    function methods:SetJustifyH(value) self.justifyH = value end
+    function methods:SetWordWrap(value) self.wordWrap = value end
+    function methods:SetBlendMode(value) self.blendMode = value end
+    function methods:LockHighlight() self.highlightLocked = true end
+    function methods:UnlockHighlight() self.highlightLocked = false end
+    function methods:Click()
+        if not self:IsEnabled() then return end
+        if self.frameType == "CheckButton" then self:SetChecked(not self:GetChecked()) end
+        if self.scripts.OnClick then self.scripts.OnClick(self) end
+    end
     function methods:SetAutoFocus(value) self.autoFocus = value end
     function methods:SetFocus()
         self.focused = true
@@ -2636,9 +2649,9 @@ local function openUI(c, keepClosed)
     function methods:GetStringHeight() return #(self.text or "") / 5 + 16 end
     function methods:SetVerticalScroll(value) self.scroll = value end
     function methods:GetVerticalScroll() return self.scroll end
-    for _, name in ipairs({ "SetJustifyH", "SetJustifyV", "SetSpacing",
+    for _, name in ipairs({ "SetJustifyV", "SetSpacing",
         "SetFrameStrata", "SetClampedToScreen", "SetMovable", "EnableMouse", "EnableMouseWheel",
-        "SetWordWrap", "SetNonSpaceWrap", "SetScrollChild", "StartMoving",
+        "SetNonSpaceWrap", "SetScrollChild", "StartMoving",
         "StopMovingOrSizing" }) do
         methods[name] = function() end
     end
@@ -3159,7 +3172,10 @@ test("dungeon labels show ranges and filling guidance never tells users to withd
     for _, widget in ipairs(widgets) do
         if widget.guildQueueKind == "dungeon" then
             dungeons = dungeons + 1
-            equal(widget.caption.text, c.ns.DungeonName(c.ns.DUNGEON_BY_ID[widget.id]))
+            local dungeon = c.ns.DUNGEON_BY_ID[widget.id]
+            equal(widget.caption.text, dungeon.name)
+            equal(widget.levelRange.text, string.format("(%d - %d)", dungeon.minLevel, dungeon.maxLevel))
+            equal(widget.tooltipTitle, c.ns.DungeonName(dungeon))
         end
         if type(widget.text) == "string" then
             if widget.text:find("Stay queued while filling", 1, true) then guidance = true end
@@ -3179,8 +3195,12 @@ local function nativeDungeonColors(c)
     return colors
 end
 local function equalTextColor(control, expected)
-    assert(control and control.caption and control.caption.textColor)
-    for index = 1, 4 do equal(control.caption.textColor[index], expected[index]) end
+    assert(control and control.caption and control.levelRange)
+    equal(control.caption.justifyH, "LEFT") equal(control.levelRange.justifyH, "RIGHT")
+    for _, region in ipairs({ control.caption, control.levelRange }) do
+        assert(region.textColor)
+        for index = 1, 4 do equal(region.textColor[index], expected[index]) end
+    end
 end
 
 test("dungeon list reproduces the native LFG three range colors at level 50", function()
@@ -3212,7 +3232,8 @@ test("dungeon range colors include both recommended boundaries for every catalog
             c.level = case[1]
             c.ns.RefreshUI()
             equalTextColor(controls[dungeon.id], colors[case[2]])
-            equal(controls[dungeon.id].caption.text, c.ns.DungeonName(dungeon))
+            equal(controls[dungeon.id].caption.text, dungeon.name)
+            equal(controls[dungeon.id].levelRange.text, string.format("(%d - %d)", dungeon.minLevel, dungeon.maxLevel))
         end
     end
     equal(#c.sent, 0) equal(#c.invites, 0)
@@ -3273,6 +3294,153 @@ test("unavailable invalid or restricted player levels use neutral dungeon text a
         equalTextColor(dungeon, colors.trivial)
         equal(#c.sent, 0) equal(#c.invites, 0)
     end
+end)
+
+test("dungeon rows match Forever LFG 22-unit spacing 30-unit checkbox artwork and font objects", function()
+    local c = client()
+    c.level = 50
+    nativeDungeonColors(c)
+    local rows, scroll = {}, nil
+    for _, control in ipairs(openUI(c)) do
+        if control.guildQueueKind == "dungeon" then rows[control.id] = control end
+        if control.guildQueueKind == "dungeonScroll" then scroll = control end
+    end
+    equal(scroll.content:GetHeight(), 8 + #c.ns.DUNGEONS * 22)
+    for index, dungeon in ipairs(c.ns.DUNGEONS) do
+        local control = rows[dungeon.id]
+        equal(control:GetWidth(), 30) equal(control:GetHeight(), 30)
+        equal(control.row:GetHeight(), 22) equal(control.row.point[2], 4)
+        equal(-control.row.point[3], 4 + (index - 1) * 22)
+        equal(control.point[3], 4) -- The native checkbox extends four units above/below its row.
+        for _, entry in ipairs({ { "GetNormalTexture", "Up" }, { "GetPushedTexture", "Down" },
+            { "GetHighlightTexture", "Highlight" }, { "GetCheckedTexture", "Check" },
+            { "GetDisabledCheckedTexture", "Check-Disabled" } }) do
+            local texture = control[entry[1]](control)
+            equal(texture.texture, "Interface\\Buttons\\UI-CheckBox-" .. entry[2])
+            equal(texture:GetWidth(), 30) equal(texture:GetHeight(), 30)
+        end
+        equal(control:GetHighlightTexture().layer, "HIGHLIGHT")
+        equal(control:GetHighlightTexture().blendMode, "ADD")
+        local font = dungeon.maxLevel < c.level and c.env.LFGActivityEntryTrivial
+            or dungeon.minLevel > c.level and c.env.LFGActivityEntryDifficult or c.env.LFGActivityEntry
+        equal(control.caption.fontObject, font) equal(control.levelRange.fontObject, font)
+        equal(control.caption:GetHeight(), 22) equal(control.levelRange:GetHeight(), 22)
+    end
+end)
+test("dungeon names and localized level ranges use separate bounded single-line columns with full tooltips", function()
+    local c = client()
+    c.env.LFD_LEVEL_FORMAT_RANGE = "[%d - %d]"
+    local controls = {}
+    for _, control in ipairs(openUI(c)) do
+        if control.guildQueueKind == "dungeon" then controls[#controls + 1] = control end
+    end
+    for _, control in ipairs(controls) do
+        local dungeon = c.ns.DUNGEON_BY_ID[control.id]
+        equal(control.caption.text, dungeon.name)
+        equal(control.levelRange.text, string.format("[%d - %d]", dungeon.minLevel, dungeon.maxLevel))
+        equal(control.caption.justifyH, "LEFT") equal(control.levelRange.justifyH, "RIGHT")
+        assert(not control.caption.wordWrap and not control.levelRange.wordWrap)
+        assert(control.caption.point[2] + control.caption:GetWidth() + 8 <= control.levelRange.point[2])
+        equal(control.levelRange.point[2] + control.levelRange:GetWidth(), control.nameButton:GetWidth())
+        equal(control.nameButton.point[2], control:GetWidth())
+        control.nameButton.scripts.OnEnter(control.nameButton)
+        equal(c.tooltip.title, c.ns.DungeonName(dungeon))
+        equal(c.tooltip.owner, control.nameButton)
+        control.nameButton.scripts.OnLeave(control.nameButton)
+    end
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("native checkbox highlight follows checkbox and name hover without changing dungeon colors or selections", function()
+    local c = client()
+    c.level = 50
+    local colors, control = nativeDungeonColors(c), nil
+    for _, widget in ipairs(openUI(c)) do
+        if widget.guildQueueKind == "dungeon" and widget.id == 1 then control = widget end
+    end
+    control.scripts.OnEnter(control)
+    assert(control.highlightLocked and c.tooltip.owner == control)
+    equalTextColor(control, colors.trivial)
+    control.scripts.OnLeave(control)
+    assert(not control.highlightLocked and not c.tooltip.shown)
+    control.nameButton.scripts.OnEnter(control.nameButton)
+    assert(control.highlightLocked)
+    c.ns.RefreshUI()
+    assert(control.highlightLocked)
+    equalTextColor(control, colors.trivial)
+    control.nameButton.scripts.OnLeave(control.nameButton)
+    assert(not control.highlightLocked)
+    control:SetEnabled(false)
+    control.nameButton.scripts.OnEnter(control.nameButton)
+    assert(not control.highlightLocked)
+    control.nameButton:Click()
+    assert(c.ns.prefs.dungeons[1])
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("dungeon hover highlights clean up on scrolling navigation hiding and another control's tooltip", function()
+    for _, action in ipairs({ "wheel", "track", "tab", "hideName", "hideWindow", "otherTooltip" }) do
+        local c = client()
+        local control, scroll, questTab, main, role
+        for _, widget in ipairs(openUI(c)) do
+            if widget.guildQueueKind == "dungeon" and widget.id == 1 then control = widget end
+            if widget.guildQueueKind == "dungeonScroll" then scroll = widget end
+            if widget.mainTab and widget.mode == "questing" then questTab = widget end
+            if widget.frameName == "GuildQueueFrame" then main = widget end
+            if widget.guildQueueKind == "role" then role = widget end
+        end
+        control.nameButton.scripts.OnEnter(control.nameButton)
+        assert(control.highlightLocked)
+        if action == "wheel" then scroll.scripts.OnMouseWheel(scroll, -1)
+        elseif action == "track" then scroll.track.scripts.OnClick(scroll.track)
+        elseif action == "tab" then questTab.scripts.OnClick(questTab)
+        elseif action == "hideName" then control.nameButton:Hide()
+        elseif action == "hideWindow" then main:Hide()
+        else role.scripts.OnEnter(role) end
+        assert(not control.highlightLocked, action)
+        assert(c.tooltip.owner ~= control.nameButton, action)
+        equal(#c.sent, 0) equal(#c.invites, 0)
+    end
+end)
+test("native dungeon name and range hit target delegates exactly one selection change to its checkbox", function()
+    local c = client()
+    local control
+    for _, widget in ipairs(openUI(c)) do
+        if widget.guildQueueKind == "dungeon" and widget.id == 2 then control = widget end
+    end
+    local changes, original = 0, c.ns.PreferencesChanged
+    c.ns.PreferencesChanged = function() changes = changes + 1 original() end
+    control.nameButton:Click()
+    assert(control:GetChecked() and c.ns.prefs.dungeons[2]) equal(changes, 1)
+    control:Click()
+    assert(not control:GetChecked() and not c.ns.prefs.dungeons[2]) equal(changes, 2)
+    c.ns.SetQueued(true)
+    c:advance(1)
+    control.nameButton:Click()
+    assert(c.ns.QueueUpdatePending()) equal(changes, 3)
+    c:advance(1)
+    local advertised = c.ns.state.records[c.ns.playerName]
+    assert(advertised and advertised.dungeons[1] and advertised.dungeons[2])
+    assert(control:GetChecked() and c.ns.queued)
+    equal(#c.invites, 0)
+end)
+test("compact dungeon scrolling reaches both end checkboxes without clipping or creating more rows", function()
+    local c = client()
+    local widgets, scroll, first, last = openUI(c), nil, nil, nil
+    for _, widget in ipairs(widgets) do
+        if widget.guildQueueKind == "dungeonScroll" then scroll = widget end
+        if widget.guildQueueKind == "dungeon" and widget.id == 1 then first = widget end
+        if widget.guildQueueKind == "dungeon" and widget.id == #c.ns.DUNGEONS then last = widget end
+    end
+    assert(-first.row.point[3] - first.point[3] >= 0)
+    local count = #widgets
+    scroll.scripts.OnMouseWheel(scroll, -1000)
+    equal(scroll:GetVerticalScroll(), scroll.content:GetHeight() - scroll:GetHeight())
+    local bottom = -last.row.point[3] - last.point[3] + last:GetHeight() - scroll:GetVerticalScroll()
+    assert(bottom <= scroll:GetHeight())
+    c.ns.RefreshUI()
+    equal(#widgets, count)
+    scroll.scripts.OnMouseWheel(scroll, 1000)
+    equal(scroll:GetVerticalScroll(), 0)
+    equal(#c.sent, 0) equal(#c.invites, 0)
 end)
 
 test("formation receipt updates group and role-list buttons immediately and expiry restores them", function()

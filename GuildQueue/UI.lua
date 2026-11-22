@@ -12,6 +12,8 @@ local pools = { groups = {}, people = {}, headings = {}, empty = {}, questing = 
     rolePeople = {}, roleEmpty = {} }
 local CONTENT_WIDTH, QUEST_WIDTH, QUEST_TOOLBAR_HEIGHT = 728, 1006, 136
 local ROLE_COLUMN_WIDTH, ROLE_ROW_HEIGHT = 234, 124
+-- Forever's Mainline-family LFG activity template (not the smaller Classic variant).
+local DUNGEON_ROW_HEIGHT, DUNGEON_CHECK_SIZE, DUNGEON_PADDING = 22, 30, 4
 local C = {
     background = { 0.025, 0.025, 0.025 }, panel = { 0.035, 0.035, 0.035 },
     card = { 0.045, 0.045, 0.045 }, tile = { 0.025, 0.025, 0.025 },
@@ -112,6 +114,7 @@ local function updateRoleIcons(icons, mask, x, y, size)
 end
 
 local function hideTooltip(control)
+    if control.dungeonCheck then control.dungeonCheck:UnlockHighlight() end
     if GameTooltip:IsOwned(control) then
         GameTooltip:Hide()
     end
@@ -187,25 +190,29 @@ local function paintDungeon(control)
     local ok, level
     if type(UnitLevel) == "function" then ok, level = pcall(UnitLevel, "player") end
     local dungeon = ns.DUNGEON_BY_ID[control.id]
-    if not ok or (hasanysecretvalues and hasanysecretvalues(level))
-        or type(level) ~= "number" or level ~= level or level <= 0 or level > 1000
-        or not dungeon or type(dungeon.minLevel) ~= "number" or type(dungeon.maxLevel) ~= "number" then
-        colorText(control.caption, C.text)
-        return
-    end
-    -- Same range boundaries and font colors as LFGListingActivityView_InitActivityButton.
-    -- Copy only RGBA, preserving our bounded label's font size and wrapping.
+    local valid = ok and not (hasanysecretvalues and hasanysecretvalues(level))
+        and type(level) == "number" and level == level and level > 0 and level <= 1000
+        and dungeon and type(dungeon.minLevel) == "number" and type(dungeon.maxLevel) == "number"
+    -- Same font objects, sizes and range boundaries as the native LFG activity rows.
     local font, fallback = LFGActivityEntry or GameFontNormal, C.heading
-    if dungeon.maxLevel ~= 0 and dungeon.maxLevel < level then
+    if not valid then
+        fallback = C.text
+    elseif dungeon.maxLevel ~= 0 and dungeon.maxLevel < level then
         font, fallback = LFGActivityEntryTrivial, C.dim
     elseif dungeon.minLevel ~= 0 and dungeon.minLevel > level then
         font, fallback = LFGActivityEntryDifficult, C.difficult
     end
-    if font and font.GetTextColor then
-        control.caption:SetTextColor(font:GetTextColor())
-    else
-        colorText(control.caption, fallback)
+    for _, region in ipairs({ control.caption, control.levelRange }) do
+        if font then region:SetFontObject(font) end
+        if valid and font and font.GetTextColor then
+            region:SetTextColor(font:GetTextColor())
+        else
+            colorText(region, fallback)
+        end
     end
+    -- Native font inheritance must not reset our separate column alignment.
+    control.caption:SetJustifyH("LEFT")
+    control.levelRange:SetJustifyH("RIGHT")
 end
 
 local function paint(control)
@@ -400,6 +407,64 @@ local function check(parent, text, x, y, width, height, callback, kind, role)
         paint(self)
     end)
     bindHover(control, showTextTooltip, true)
+    paint(control)
+    return control
+end
+
+local function dungeonCheck(parent, dungeon, index)
+    local row = CreateFrame("Frame", nil, parent)
+    row.guildQueueKind = "dungeonRow"
+    local width = parent:GetWidth() - 2 * DUNGEON_PADDING
+    place(row, DUNGEON_PADDING, DUNGEON_PADDING + (index - 1) * DUNGEON_ROW_HEIGHT, width, DUNGEON_ROW_HEIGHT)
+    local control = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+    place(control, 0, (DUNGEON_ROW_HEIGHT - DUNGEON_CHECK_SIZE) / 2, DUNGEON_CHECK_SIZE, DUNGEON_CHECK_SIZE)
+    control.guildQueueKind, control.guildQueueCheck, control.id = "dungeon", true, dungeon.id
+    control.row, row.checkButton = row, control
+    -- Exact native LFG checkbox artwork; keep its highlight on the HIGHLIGHT layer.
+    for _, entry in ipairs({ { "GetNormalTexture", "Up" }, { "GetPushedTexture", "Down" },
+        { "GetHighlightTexture", "Highlight" }, { "GetCheckedTexture", "Check" },
+        { "GetDisabledCheckedTexture", "Check-Disabled" } }) do
+        local texture = control[entry[1]](control)
+        if texture then
+            texture:SetTexture("Interface\\Buttons\\UI-CheckBox-" .. entry[2])
+            texture:ClearAllPoints()
+            texture:SetAllPoints(control)
+            if entry[2] == "Highlight" then
+                texture:SetDrawLayer("HIGHLIGHT")
+                texture:SetBlendMode("ADD")
+            end
+        end
+    end
+    local nameButton = CreateFrame("Button", nil, row)
+    nameButton.guildQueueKind = "dungeonName"
+    control.nameButton = nameButton
+    place(nameButton, DUNGEON_CHECK_SIZE, 0, width - DUNGEON_CHECK_SIZE, DUNGEON_ROW_HEIGHT)
+    local rangeWidth, gap = 60, 8
+    control.caption = label(nameButton, ns.SafeText(dungeon.name), 0, 0,
+        nameButton:GetWidth() - rangeWidth - gap, DUNGEON_ROW_HEIGHT, "GameFontNormal", C.heading)
+    control.levelRange = label(nameButton,
+        string.format(LFD_LEVEL_FORMAT_RANGE or "(%d - %d)", dungeon.minLevel, dungeon.maxLevel),
+        nameButton:GetWidth() - rangeWidth, 0, rangeWidth, DUNGEON_ROW_HEIGHT, "GameFontNormal", C.heading)
+    control.levelRange:SetJustifyH("RIGHT")
+    control.tooltipTitle = ns.SafeText(ns.DungeonName(dungeon))
+    control.tooltipText = "Select one or more. Your selections update while queued."
+    nameButton.tooltipTitle, nameButton.tooltipText = control.tooltipTitle, control.tooltipText
+    control.dungeonCheck, nameButton.dungeonCheck = control, control
+    control:SetScript("OnClick", function(self)
+        ns.prefs.dungeons[self.id] = self:GetChecked() and true or nil
+        ns.PreferencesChanged()
+        paint(self)
+    end)
+    nameButton:SetScript("OnClick", function()
+        if control:IsEnabled() then control:Click() end
+    end)
+    bindHover(control, showTextTooltip, true)
+    bindHover(nameButton, showTextTooltip)
+    for _, target in ipairs({ control, nameButton }) do
+        target:HookScript("OnEnter", function()
+            if control:IsEnabled() then control:LockHighlight() end
+        end)
+    end
     paint(control)
     return control
 end
@@ -1023,15 +1088,9 @@ local function createUI()
     selectionCount:SetJustifyH("RIGHT")
     label(sidebar, "Match on a shared dungeon.", 14, 197, 230, 18, nil, C.muted)
     dungeonScroll = scrollArea(sidebar, 12, 224, 236, 206, "dungeonScroll")
-    dungeonScroll.content:SetHeight(math.max(1, #ns.DUNGEONS * 38))
+    dungeonScroll.content:SetHeight(2 * DUNGEON_PADDING + #ns.DUNGEONS * DUNGEON_ROW_HEIGHT)
     for index, dungeon in ipairs(ns.DUNGEONS) do
-        local control = check(dungeonScroll.content, ns.DungeonName(dungeon), 0, (index - 1) * 38, 218, 34,
-            function(self)
-                ns.prefs.dungeons[self.id] = self:GetChecked() and true or nil
-                ns.PreferencesChanged()
-            end, "dungeon")
-        control.id = dungeon.id
-        dungeonChecks[dungeon.id] = control
+        dungeonChecks[dungeon.id] = dungeonCheck(dungeonScroll.content, dungeon, index)
     end
     dungeonScroll.update()
     label(sidebar, "Ranges are recommended levels", 14, 439, 230, 16, nil, C.muted)

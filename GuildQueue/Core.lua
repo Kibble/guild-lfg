@@ -1212,7 +1212,7 @@ local function tick()
         elseif ns.addonVersion and clock - lastVersionSent >= VERSION_REPLY_COOLDOWN
             and (pendingVersionLogin or (pendingVersionReplyAt and pendingVersionReplyAt <= clock)) then
             lastAttempt = clock
-            if send(ns.Protocol.Encode({ kind = "V", sentAt = serverNow, version = ns.addonVersion })) then
+            if send(ns.Protocol.Encode({ kind = "V", sentAt = serverNow, version = newerVersion or ns.addonVersion })) then
                 pendingVersionLogin, pendingVersionReplyAt, lastVersionSent = false, nil, clock
             end
         end
@@ -1253,13 +1253,14 @@ local function receive(prefix, message, channel, sender)
     if packet.kind == "V" then
         if packet.sentAt <= now + 5 and now - packet.sentAt < ns.TIMEOUT then
             presence[name] = now
-            local comparison = ns.Protocol.CompareVersions(packet.version, ns.addonVersion)
+            -- Reports describe the highest known release, not the sender's installed build.
+            local comparison = ns.Protocol.CompareVersions(packet.version, newerVersion or ns.addonVersion)
             if comparison then
-                if comparison > 0 and (not newerVersion or ns.Protocol.CompareVersions(packet.version, newerVersion) > 0) then
+                if comparison > 0 then
                     newerVersion = packet.version
                 end
                 if comparison >= 0 then
-                    -- Only a report heard after scheduling can satisfy a newcomer.
+                    -- Cancel only when the newcomer can hear at least our highest known report.
                     pendingVersionReplyAt = nil
                 elseif not pendingVersionLogin and not pendingVersionReplyAt then
                     pendingVersionReplyAt = math.max(GetTime() + math.random(2, 5), lastVersionSent + VERSION_REPLY_COOLDOWN)

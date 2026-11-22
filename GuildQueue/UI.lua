@@ -141,7 +141,7 @@ local function showMinimapTooltip(control)
     local version = ns.GetUpdateVersion()
     if version then
         GameTooltip:AddLine("Newer version detected: v" .. ns.SafeText(version), C.gold[1], C.gold[2], C.gold[3], true)
-        GameTooltip:AddLine("Reported by a guildmate; not verified against GitHub.", C.muted[1], C.muted[2], C.muted[3], true)
+        GameTooltip:AddLine("Reported by a guildmate; not verified against GitHub. May be relayed.", C.muted[1], C.muted[2], C.muted[3], true)
         GameTooltip:AddLine("Open Guild Queue and click the gold version notice for the manual download link.", 1, 1, 1, true)
     end
     GameTooltip:AddLine(control.tooltipText, 1, 1, 1, true)
@@ -268,7 +268,7 @@ local function showUpdateDialog()
         applyBackdrop(dialog, windowBackdrop)
         surface(dialog, C.background)
         label(dialog, "Guild Queue update", 22, 16, 414, 28, "GameFontNormalLarge", C.heading)
-        label(dialog, "Reported by a guildmate; not verified against GitHub.\nNothing is downloaded or installed automatically.",
+        label(dialog, "Reported by a guildmate; not verified against GitHub. May be relayed.\nNothing is downloaded or installed automatically.",
             22, 52, 436, 40, nil, C.muted, true)
         dialog.installedVersion = label(dialog, "", 22, 100, 436, 20, "GameFontNormal", C.text)
         dialog.installedVersion.guildQueueKind = "updateInstalledVersion"
@@ -947,7 +947,7 @@ local function createUI()
     updateButton.caption = label(updateButton, "", 0, 0, 430, 16, nil, C.gold)
     updateButton:SetFontString(updateButton.caption)
     updateButton.tooltipTitle = "Guildmate-reported update"
-    updateButton.tooltipText = "Not verified against GitHub. Click for version details and a manually copied project link."
+    updateButton.tooltipText = "May be relayed; not verified against GitHub. Click for version details and a manually copied project link."
     updateButton:SetScript("OnClick", showUpdateDialog)
     bindHover(updateButton, showTextTooltip)
     updateButton:Hide()

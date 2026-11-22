@@ -1095,16 +1095,12 @@ local function createUI()
     end
     dungeonScroll.update()
     label(sidebar, "Ranges are recommended levels", 14, 439, 230, 16, nil, C.muted)
-    button(sidebar, "Select all", 14, 464, 232, 34, function()
-        for _, dungeon in ipairs(ns.DUNGEONS) do ns.prefs.dungeons[dungeon.id] = true end
-        ns.PreferencesChanged()
-    end, "selectAll")
-    joinButton = button(sidebar, "Join queue", 14, 506, 232, 34, function()
+    joinButton = button(sidebar, "Join queue", 14, 464, 232, 34, function()
         ns.SetQueued(not ns.queued)
     end, "queue")
     joinButton:SetMotionScriptsWhileDisabled(true)
     joinButton.tooltip = showQueueTooltip
-    label(sidebar, "Selections update while queued.", 14, 548, 232, 16, nil, C.muted)
+    label(sidebar, "Selections update while queued.", 14, 506, 232, 16, nil, C.muted)
 
     groupsTab = button(frame, "Groups + individuals", 296, 112, 206, 32,
         function() switchTab("groups") end, "tab")

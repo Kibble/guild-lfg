@@ -3316,13 +3316,12 @@ test("dungeon range colors include both recommended boundaries for every catalog
     end
     equal(#c.sent, 0) equal(#c.invites, 0)
 end)
-test("level-up hover click and select-all keep difficulty colors current without filtering selections", function()
+test("level-up hover and individual clicks keep difficulty colors current without filtering selections", function()
     local c = client()
     c.level = 50
-    local colors, controls, selectAll = nativeDungeonColors(c), {}, nil
+    local colors, controls = nativeDungeonColors(c), {}
     for _, control in ipairs(openUI(c)) do
         if control.guildQueueKind == "dungeon" then controls[control.id] = control end
-        if control.guildQueueKind == "selectAll" then selectAll = control end
     end
     c:advance(5)
     local sent = #c.sent
@@ -3340,9 +3339,11 @@ test("level-up hover click and select-all keep difficulty colors current without
     controls[20].scripts.OnClick(controls[20])
     equalTextColor(controls[20], colors.trivial)
     assert(c.ns.prefs.dungeons[20])
-    selectAll.scripts.OnClick(selectAll)
     for _, dungeon in ipairs(c.ns.DUNGEONS) do
-        assert(c.ns.prefs.dungeons[dungeon.id] and controls[dungeon.id]:GetChecked() and controls[dungeon.id]:IsEnabled())
+        local control = controls[dungeon.id]
+        control:SetChecked(true)
+        control.scripts.OnClick(control)
+        assert(c.ns.prefs.dungeons[dungeon.id] and control:GetChecked() and control:IsEnabled())
     end
     equalTextColor(controls[20], colors.trivial)
     equalTextColor(controls[26], colors.difficult)
@@ -3865,27 +3866,32 @@ test("UI opens and its multi-select controls drive the real queue", function()
     assert(not c.ns.queued)
 end)
 
-test("dungeon controls omit Clear while Leave queue preserves selections and Select all still works", function()
+test("dungeon controls omit Clear and Select all while individual selections survive leaving the queue", function()
     local c = client({ saved = { roles = 2, dungeons = { [1] = true, [2] = true } } })
-    local widgets, join, selectAll = openUI(c)
+    local widgets, join, checks = openUI(c), nil, {}
     for _, control in ipairs(widgets) do
         assert(control.guildQueueKind ~= "clear" and control.text ~= "Clear")
+        assert(control.guildQueueKind ~= "selectAll" and control.text ~= "Select all")
         if control.guildQueueKind == "queue" then join = control end
-        if control.guildQueueKind == "selectAll" then selectAll = control end
+        if control.guildQueueKind == "dungeon" then checks[control.id] = control end
     end
-    assert(join and selectAll)
-    equal(selectAll:GetWidth(), join:GetWidth())
+    assert(join and not c.ns.prefs.dungeons[3])
+    checks[3]:SetChecked(true)
+    checks[3].scripts.OnClick(checks[3])
+    assert(c.ns.prefs.dungeons[3])
     local roles, dungeons = c.ns.prefs.roles, c.ns.Protocol.DungeonList(c.ns.prefs.dungeons)
     join.scripts.OnClick(join)
     c:advance(1)
-    assert(c.ns.queued)
+    assert(c.ns.queued and c.ns.state.records[c.ns.playerName].dungeons[3])
     equal(join.text, "Leave queue")
     join.scripts.OnClick(join)
     assert(not c.ns.queued)
     equal(c.ns.prefs.roles, roles)
     equal(c.ns.Protocol.DungeonList(c.ns.prefs.dungeons), dungeons)
-    selectAll.scripts.OnClick(selectAll)
-    for _, dungeon in ipairs(c.ns.DUNGEONS) do assert(c.ns.prefs.dungeons[dungeon.id]) end
+    assert(checks[3]:GetChecked())
+    checks[3]:SetChecked(false)
+    checks[3].scripts.OnClick(checks[3])
+    assert(not c.ns.prefs.dungeons[3] and c.ns.prefs.dungeons[1] and c.ns.prefs.dungeons[2])
     assert(not c.ns.queued)
     equal(#c.invites, 0)
 end)
@@ -4051,11 +4057,10 @@ end)
 test("UI uses native WoW borders, buttons, checkboxes and close-button artwork", function()
     local c = client()
     local widgets = openUI(c)
-    local surfaces, buttons, checks, main, close, selectAll, join = 0, 0, 0
+    local surfaces, buttons, checks, main, close, join = 0, 0, 0
     for _, control in ipairs(widgets) do
         if control.frameName == "GuildQueueFrame" then main = control end
         if control.guildQueueKind == "close" then close = control end
-        if control.guildQueueKind == "selectAll" then selectAll = control end
         if control.guildQueueKind == "queue" then join = control end
         if control.template == "UIPanelButtonTemplate" then buttons = buttons + 1 end
         if control.template == "UICheckButtonTemplate" then checks = checks + 1 end
@@ -4069,9 +4074,9 @@ test("UI uses native WoW borders, buttons, checkboxes and close-button artwork",
         end
     end
     assert(surfaces > 3 and main and buttons >= 5)
-    equal(selectAll:GetHeight(), join:GetHeight())
-    equal(selectAll:GetHeight(), 34)
-    assert(-selectAll.point[3] + selectAll:GetHeight() < -join.point[3])
+    equal(join:GetHeight(), 34)
+    equal(join:GetWidth(), 232)
+    equal(join.point[3], -464) -- Reuse the removed Select all row without a blank button slot.
     equal(checks, 4 + #c.ns.DUNGEONS) -- Roles, dungeons, and opt-in quest sharing.
     equal(close.template, "UIPanelCloseButton")
     equal(close.text, "") -- Native X texture, not a second text-based X.

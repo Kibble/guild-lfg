@@ -26,6 +26,9 @@ local localDirty, lastLocalScan, lastRosterRequest = true, -100, -100
 local questBatch, questBatchIndex, questBatchSignature = nil, 1, nil
 local questSentSignature, questStopPending = nil, false
 local lastQuestSent, lastQuestPrepared = -100, -100
+local pendingVersionLogin, pendingVersionReplyAt, newerVersion = false, nil, nil
+local lastVersionSent, VERSION_REPLY_COOLDOWN = -100, 30
+ns.UPDATE_URL = "https://github.com/Kibble/guild-lfg"
 
 local function secret(...)
     return hasanysecretvalues and hasanysecretvalues(...)
@@ -223,6 +226,10 @@ end
 
 function ns.IsReady()
     return registered and IsInGuild() and guildIdentityReady and ns.playerName ~= nil
+end
+
+function ns.GetUpdateVersion()
+    return newerVersion
 end
 
 function ns.OnlineAddonCount()
@@ -838,6 +845,7 @@ local function applyGuildIdentity(guildName, guildRealm)
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
         presence, guildMembers, lastMemberInviteAt = {}, {}, {}
         pendingRoleNotices, receivedRoleNotices = {}, {}
+        pendingVersionLogin, pendingVersionReplyAt, newerVersion = key ~= nil and ns.addonVersion ~= nil, nil, nil
         formationClaims, formationByOwner, formationWatermarks, pendingFormationReleases = {}, {}, {}, {}
         formationWatermarkCount, lastFormationFailure = 0, -100
         ns.questing = ns.Questing.New()
@@ -1201,6 +1209,12 @@ local function tick()
         elseif questBatch then
             lastAttempt = clock
             sendQuestPart(clock)
+        elseif ns.addonVersion and clock - lastVersionSent >= VERSION_REPLY_COOLDOWN
+            and (pendingVersionLogin or (pendingVersionReplyAt and pendingVersionReplyAt <= clock)) then
+            lastAttempt = clock
+            if send(ns.Protocol.Encode({ kind = "V", sentAt = serverNow, version = ns.addonVersion })) then
+                pendingVersionLogin, pendingVersionReplyAt, lastVersionSent = false, nil, clock
+            end
         end
     end
     ns.RefreshUI()
@@ -1234,6 +1248,25 @@ local function receive(prefix, message, channel, sender)
     end
     local packet = ns.Protocol.Decode(message)
     if not packet then
+        return
+    end
+    if packet.kind == "V" then
+        if packet.sentAt <= now + 5 and now - packet.sentAt < ns.TIMEOUT then
+            presence[name] = now
+            local comparison = ns.Protocol.CompareVersions(packet.version, ns.addonVersion)
+            if comparison then
+                if comparison > 0 and (not newerVersion or ns.Protocol.CompareVersions(packet.version, newerVersion) > 0) then
+                    newerVersion = packet.version
+                end
+                if comparison >= 0 then
+                    -- Only a report heard after scheduling can satisfy a newcomer.
+                    pendingVersionReplyAt = nil
+                elseif not pendingVersionLogin and not pendingVersionReplyAt then
+                    pendingVersionReplyAt = math.max(GetTime() + math.random(2, 5), lastVersionSent + VERSION_REPLY_COOLDOWN)
+                end
+            end
+            ns.RefreshUI()
+        end
         return
     end
     if packet.kind == "F" or packet.kind == "U" then
@@ -1279,6 +1312,8 @@ local function initialize()
         GuildQueueDB = {}
     end
     ns.prefs = GuildQueueDB
+    local version = safeCall(C_AddOns and C_AddOns.GetAddOnMetadata, addonName, "Version")
+    ns.addonVersion = ns.Protocol.VersionParts(version) and version or nil
     ns.prefs.shareQuests = ns.prefs.shareQuests == true
     if type(ns.prefs.roles) ~= "number" or ns.prefs.roles ~= ns.prefs.roles
         or ns.prefs.roles < 0 or ns.prefs.roles > 7 or ns.prefs.roles % 1 ~= 0 then

@@ -1,5 +1,8 @@
 -- Run from the project root: lua5.1 tests/run.lua
 local passed, failed = 0, 0
+local tocFile = assert(io.open("GuildQueue/GuildQueue.toc", "r"))
+local testAddonVersion = assert(tocFile:read("*a"):match("## Version:%s*([^\r\n]+)"))
+tocFile:close()
 local function test(name, run)
     local ok, err = pcall(run)
     if ok then
@@ -140,6 +143,27 @@ test("formation packets reject invalid timestamps tokens fingerprints and extra 
         "1|F|1000|1|0123456789abcde|0", "1|U|1000|1|0123456789abcdef|extra", "2|F|1000|1|0123456789abcdef|0",
         "1|F|1000|2|0123456789abcdef|bad", "1|F|1000|2|0123456789abcdef|2", "1|F|1000|2|0123456789abcdef|-1" }) do
         assert(ns.Protocol.Decode(text) == nil, text)
+    end
+end)
+
+test("version advertisements round trip and compare numeric stable release components", function()
+    local p = assert(ns.Protocol.Decode(ns.Protocol.Encode({ kind = "V", sentAt = 1000, version = "0.16.0" })))
+    equal(p.kind, "V") equal(p.sentAt, 1000) equal(p.version, "0.16.0")
+    for _, pair in ipairs({ { "0.10.0", "0.9.99" }, { "1.0.0", "0.9999.9999" }, { "2.3.10", "2.3.9" } }) do
+        equal(ns.Protocol.CompareVersions(pair[1], pair[2]), 1)
+        equal(ns.Protocol.CompareVersions(pair[2], pair[1]), -1)
+        equal(ns.Protocol.CompareVersions(pair[1], pair[1]), 0)
+    end
+end)
+test("version advertisements reject noncanonical prerelease malformed oversized and URL payloads", function()
+    for _, version in ipairs({ "", "v1.2.3", "1.2", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03", "1.2.3-beta",
+        "1.2.3+build", "10000.0.0", "-1.2.3", "1.2.3 ", "https://example.invalid", string.rep("9", 200) }) do
+        assert(not ns.Protocol.VersionParts(version))
+        assert(not ns.Protocol.Decode("1|V|1000|" .. version))
+        equal(ns.Protocol.CompareVersions(version, "1.2.3"), nil)
+    end
+    for _, text in ipairs({ "1|V|0|1.2.3", "1|V|1000|1.2.3|extra", "2|V|1000|1.2.3", "1|V|1000" }) do
+        assert(not ns.Protocol.Decode(text))
     end
 end)
 
@@ -471,6 +495,14 @@ local function client(options)
     c.ns.ToggleUI = function() c.toggled = true end
     c.ns.InitializeMinimap = function() c.minimapStarts = (c.minimapStarts or 0) + 1 end
     env.GuildQueueDB = options.saved or { roles = 4, dungeons = { [1] = true } }
+    if not options.noMetadataAPI then
+        env.C_AddOns = { GetAddOnMetadata = function(name, field)
+            equal(name, "GuildQueue") equal(field, "Version")
+            if options.metadataError then error("Metadata unavailable") end
+            if options.addonVersion ~= nil then return options.addonVersion end
+            return testAddonVersion
+        end }
+    end
     env.GetTime = function() return c.clock end
     env.GetServerTime = function() return c.now end
     env.GetNormalizedRealmName = function() return "TestRealm" end
@@ -590,6 +622,232 @@ local function client(options)
     c:fire("PLAYER_LOGIN")
     return c
 end
+
+local function versionPackets(c)
+    local packets = {}
+    for _, message in ipairs(c.sent) do
+        local p = c.ns.Protocol.Decode(message.text)
+        if p and p.kind == "V" then
+            p.clock, p.channel, p.prefix = message.clock, message.channel, message.prefix
+            packets[#packets + 1] = p
+        end
+    end
+    return packets
+end
+local function relayVersions(clients)
+    for _, c in ipairs(clients) do
+        local sender, original = c, c.env.C_ChatInfo.SendAddonMessage
+        c.env.C_ChatInfo.SendAddonMessage = function(prefix, text, channel)
+            local result = original(prefix, text, channel)
+            local p = sender.ns.Protocol.Decode(text)
+            if result == 0 and p and p.kind == "V" then
+                for _, peer in ipairs(clients) do
+                    if peer ~= sender then peer:fire("CHAT_MSG_ADDON", prefix, text, channel, sender.ns.playerName) end
+                end
+            end
+            return result
+        end
+    end
+end
+
+test("version discovery advertises once after readiness without periodic version requests or queue side effects", function()
+    local c = client({ saved = { roles = 0, dungeons = {} } })
+    c:advance(90)
+    local packets = versionPackets(c)
+    equal(#packets, 1)
+    equal(packets[1].version, testAddonVersion)
+    equal(packets[1].channel, "GUILD") equal(packets[1].prefix, c.ns.PREFIX)
+    equal(c.ns.Protocol.Decode(c.sent[1].text).kind, "X") -- Queue cleanup retains priority.
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+    equal(#c.invites, 0) equal(c.ns.GetUpdateVersion(), nil)
+    c:fire("PLAYER_ENTERING_WORLD")
+    c:advance(5)
+    equal(#versionPackets(c), 1)
+end)
+test("version login announcement waits for guild identity and chat restrictions then recovers", function()
+    local c = client({ noGuild = true })
+    c:advance(5)
+    equal(#c.sent, 0)
+    c.guild, c.guildInfoUnavailable, c.locked = "A Guild", true, true
+    c:advance(5)
+    equal(#versionPackets(c), 0)
+    c.guildInfoUnavailable = false
+    c:advance(6)
+    equal(#versionPackets(c), 0)
+    c.locked = false
+    c:advance(10)
+    equal(#versionPackets(c), 1)
+    assert(not c.ns.queued)
+    equal(#c.invites, 0)
+end)
+test("failed version sends use existing backoff and only clear the announcement on success", function()
+    local c = client()
+    c:advance(2)
+    c.result = 11
+    c:advance(1)
+    equal(#versionPackets(c), 1)
+    c:advance(4)
+    equal(#versionPackets(c), 1)
+    c.result = 0
+    c:advance(1)
+    local packets = versionPackets(c)
+    equal(#packets, 2) equal(packets[2].clock - packets[1].clock, 5)
+    c:advance(30)
+    equal(#versionPackets(c), 2)
+    equal(#c.invites, 0)
+end)
+test("version discovery yields to pending queue preference updates", function()
+    local c = client()
+    c.ns.SetQueued(true)
+    c:advance(2)
+    c.ns.prefs.roles = 6
+    c.ns.PreferencesChanged()
+    c:advance(1)
+    equal(c.ns.Protocol.Decode(c.sent[#c.sent].text).kind, "S")
+    equal(#versionPackets(c), 0)
+    c:advance(1)
+    equal(#versionPackets(c), 1)
+    assert(c.ns.queued)
+    equal(c.ns.state.records[c.ns.playerName].roles, 6)
+    equal(#c.invites, 0)
+end)
+test("version receipts retain only the highest newer stable report without rematching or persisting it", function()
+    local c = client({ addonVersion = "0.9.9" })
+    local state, seen = c.ns.state.records, c.ns.state.seen
+    c.ns.Match = function() error("Version messages must not rematch") end
+    for _, version in ipairs({ "0.10.0", "0.11.0", "0.10.1", "0.9.9", "0.8.0" }) do
+        c:receive("Friend-TestRealm", { kind = "V", sentAt = c.now, version = version })
+    end
+    equal(c.ns.GetUpdateVersion(), "0.11.0")
+    equal(c.ns.state.records, state) equal(c.ns.state.seen, seen)
+    equal(next(state), nil) equal(next(seen), nil)
+    equal(c.ns.prefs.newerVersion, nil)
+    assert(not c.ns.queued)
+    equal(#c.invites, 0)
+end)
+test("version discovery ignores wrong channels prefixes own echoes and stale or future reports", function()
+    local c = client({ addonVersion = "1.0.0" })
+    local p = { kind = "V", sentAt = c.now, version = "2.0.0" }
+    for _, channel in ipairs({ "WHISPER", "PARTY", "RAID", "OFFICER", "CHANNEL" }) do c:receive("Friend-TestRealm", p, channel) end
+    c:receive("Friend-TestRealm", p, "GUILD", "OtherAddon")
+    c:receive(c.ns.playerName, p)
+    c:receive("Friend-TestRealm", { kind = "V", sentAt = c.now - c.ns.TIMEOUT, version = "2.0.0" })
+    c:receive("Friend-TestRealm", { kind = "V", sentAt = c.now + 6, version = "2.0.0" })
+    equal(c.ns.GetUpdateVersion(), nil)
+    equal(c.ns.OnlineAddonCount(), 1)
+    c:receive("Friend-TestRealm", p)
+    equal(c.ns.GetUpdateVersion(), "2.0.0") equal(c.ns.OnlineAddonCount(), 2)
+end)
+test("missing invalid prerelease or failing installed metadata never advertises a guessed release", function()
+    for _, options in ipairs({ { noMetadataAPI = true }, { addonVersion = false }, { addonVersion = "0.16.0-beta" },
+        { addonVersion = "invalid" }, { metadataError = true } }) do
+        local c = client(options)
+        c:advance(10)
+        equal(c.ns.addonVersion, nil) equal(#versionPackets(c), 0)
+        c:receive("Friend-TestRealm", { kind = "V", sentAt = c.now, version = "9.0.0" })
+        equal(c.ns.GetUpdateVersion(), nil)
+        assert(not c.ns.queued)
+    end
+end)
+test("equal or newer replies cancel delayed responses but lower reports do not", function()
+    local c = client({ addonVersion = "2.0.0" })
+    c:advance(35)
+    c.env.math = setmetatable({ random = function() return 2 end }, { __index = math })
+    c:receive("Old-TestRealm", { kind = "V", sentAt = c.now, version = "1.0.0" })
+    c:receive("Equal-TestRealm", { kind = "V", sentAt = c.now, version = "2.0.0" })
+    c:advance(5)
+    equal(#versionPackets(c), 1)
+    c:receive("Old-TestRealm", { kind = "V", sentAt = c.now, version = "1.0.0" })
+    c:receive("Lower-TestRealm", { kind = "V", sentAt = c.now, version = "1.9.9" })
+    c:advance(2)
+    equal(#versionPackets(c), 2)
+    c:receive("Old-TestRealm", { kind = "V", sentAt = c.now, version = "1.0.0" })
+    c:advance(29)
+    equal(#versionPackets(c), 2) -- Never more than one response per 30 seconds.
+    c:receive("Newer-TestRealm", { kind = "V", sentAt = c.now, version = "3.0.0" })
+    c:advance(2)
+    equal(#versionPackets(c), 2) equal(c.ns.GetUpdateVersion(), "3.0.0")
+end)
+test("a newer login announces to existing older users without starting a request response chain", function()
+    local old = client({ addonVersion = "1.0.0", characterName = "Old" })
+    old:advance(35)
+    local updated = client({ addonVersion = "2.0.0", characterName = "Updated" })
+    updated.now = old.now
+    relayVersions({ old, updated })
+    for _ = 1, 8 do old:advance(1) updated:advance(1) end
+    equal(old.ns.GetUpdateVersion(), "2.0.0")
+    equal(#versionPackets(old), 1) equal(#versionPackets(updated), 1)
+    equal(#old.invites, 0) equal(#updated.invites, 0)
+end)
+test("an outdated login discovers newer peers while overheard replies suppress redundant broadcasts", function()
+    local a = client({ addonVersion = "2.0.0", characterName = "Alpha" })
+    local b = client({ addonVersion = "2.0.0", characterName = "Bravo" })
+    a:advance(35) b:advance(35)
+    a.env.math = setmetatable({ random = function() return 2 end }, { __index = math })
+    b.env.math = setmetatable({ random = function() return 5 end }, { __index = math })
+    local old = client({ addonVersion = "1.0.0", characterName = "Old" })
+    old.now = a.now
+    relayVersions({ a, b, old })
+    for _ = 1, 12 do a:advance(1) b:advance(1) old:advance(1) end
+    equal(old.ns.GetUpdateVersion(), "2.0.0")
+    equal(#versionPackets(old), 1) equal(#versionPackets(a), 2) equal(#versionPackets(b), 1)
+    assert(not a.ns.queued and not b.ns.queued and not old.ns.queued)
+    equal(#a.invites + #b.invites + #old.invites, 0)
+end)
+test("a lower newer-peer reply does not suppress the highest installed version", function()
+    local a = client({ addonVersion = "2.0.0", characterName = "Alpha" })
+    local b = client({ addonVersion = "3.0.0", characterName = "Bravo" })
+    a:advance(35) b:advance(35)
+    a.env.math = setmetatable({ random = function() return 2 end }, { __index = math })
+    b.env.math = setmetatable({ random = function() return 5 end }, { __index = math })
+    local old = client({ addonVersion = "1.0.0", characterName = "Old" })
+    old.now = a.now
+    relayVersions({ a, b, old })
+    for _ = 1, 12 do a:advance(1) b:advance(1) old:advance(1) end
+    equal(old.ns.GetUpdateVersion(), "3.0.0")
+    equal(#versionPackets(a), 2) equal(#versionPackets(b), 2) equal(#versionPackets(old), 1)
+end)
+
+test("guild changes and temporary identity recovery cannot bypass the version broadcast cooldown", function()
+    for _, reason in ipairs({ "guildSwitch", "identityRecovery" }) do
+        local c = client()
+        c:advance(3)
+        equal(#versionPackets(c), 1)
+        if reason == "guildSwitch" then
+            c.guild = "New Guild"
+            c:fire("PLAYER_GUILD_UPDATE", "player")
+        else
+            c.guildInfoUnavailable = true
+            c:fire("PLAYER_GUILD_UPDATE", "player")
+            c.guildInfoUnavailable = false
+        end
+        c:advance(29)
+        equal(#versionPackets(c), 1)
+        c:advance(1)
+        local packets = versionPackets(c)
+        equal(#packets, 2) equal(packets[2].clock - packets[1].clock, 30)
+        assert(not c.ns.queued)
+        equal(#c.invites, 0)
+    end
+end)
+
+test("guild changes clear update evidence and pending replies and announce only once in the new guild", function()
+    local c = client({ addonVersion = "2.0.0" })
+    c:advance(35)
+    c:receive("Newer-TestRealm", { kind = "V", sentAt = c.now, version = "3.0.0" })
+    c:receive("Older-TestRealm", { kind = "V", sentAt = c.now, version = "1.0.0" })
+    c.guild = "New Guild"
+    c:fire("PLAYER_GUILD_UPDATE", "player")
+    equal(c.ns.GetUpdateVersion(), nil)
+    c:advance(10)
+    equal(#versionPackets(c), 2)
+    c:advance(35)
+    equal(#versionPackets(c), 2)
+    c.guild = nil
+    c:fire("PLAYER_GUILD_UPDATE", "player")
+    c:receive("Newer-TestRealm", { kind = "V", sentAt = c.now, version = "4.0.0" })
+    equal(c.ns.GetUpdateVersion(), nil)
+end)
 
 local function receiveQuests(c, sender, quests, revision, zoneID, channel, prefix)
     local messages = c.ns.Questing.Encode(revision or 1, c.now, zoneID or 37, 24, quests)
@@ -2203,6 +2461,12 @@ local function openUI(c, keepClosed)
         if self.fontString then self.fontString.text = self.text end
     end
     function methods:SetFontString(fontString) self.fontString = fontString end
+    function methods:SetAutoFocus(value) self.autoFocus = value end
+    function methods:SetFocus()
+        self.focused = true
+        if self.scripts.OnEditFocusGained then self.scripts.OnEditFocusGained(self) end
+    end
+    function methods:HighlightText() self.highlighted = true end
     function methods:SetPoint(...) self.point = { ... } end
     function methods:SetScale(scale) self.scale = scale end
     function methods:SetBackdrop(value) self.backdrop = value end
@@ -2279,8 +2543,11 @@ local function openUI(c, keepClosed)
     c.tooltip = {}
     c.env.GameTooltip = {
         SetOwner = function(_, owner) c.tooltip.owner = owner end,
-        SetText = function(_, text) c.tooltip.title = text end,
-        AddLine = function(_, text) c.tooltip.text = text end,
+        SetText = function(_, text) c.tooltip.title, c.tooltip.lines = text, {} end,
+        AddLine = function(_, text)
+            c.tooltip.text = text
+            c.tooltip.lines[#c.tooltip.lines + 1] = text
+        end,
         IsOwned = function(_, owner) return c.tooltip.owner == owner end,
         Show = function() c.tooltip.shown = true end,
         Hide = function() c.tooltip.owner, c.tooltip.shown = nil, false end,
@@ -2480,6 +2747,93 @@ test("minimap hover explains controls and hiding stops dragging without clearing
     launcher:Hide()
     equal(launcher.scripts.OnUpdate, nil)
     assert(c.tooltip.shown and c.tooltip.owner == other)
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+
+test("newer-version notice is quiet visible in every main view and leaves queue status intact", function()
+    local c = client({ addonVersion = "1.0.0" })
+    local widgets, notice, hint, queueStatus, views, tabs = openUI(c), nil, nil, nil, {}, {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "updateNotice" then notice = control end
+        if control.guildQueueKind == "guildHint" then hint = control end
+        if control.mainTab then tabs[control.mode] = control end
+        if control.guildQueueKind == "viewSwitch" then views[control.viewMode] = control end
+        if control.text == "Not queued" then queueStatus = control end
+        assert(control.guildQueueKind ~= "updateDialog")
+    end
+    assert(notice and hint and queueStatus and not notice:IsShown() and hint:IsShown())
+    local count, messages = #widgets, #c.messages
+    c:receive("Updated-TestRealm", { kind = "V", sentAt = c.now, version = "2.0.0" })
+    equal(#widgets, count) equal(#c.messages, messages) -- No popup or chat announcement.
+    assert(notice:IsShown() and not hint:IsShown())
+    equal(notice.text, "Newer version detected: v2.0.0")
+    equal(queueStatus.text, "Not queued")
+    assert(notice.point[2] + notice:GetWidth() <= 452)
+    views.roles.scripts.OnClick(views.roles)
+    assert(notice:IsShown())
+    tabs.questing.scripts.OnClick(tabs.questing)
+    assert(notice:IsShown())
+    tabs.dungeons.scripts.OnClick(tabs.dungeons)
+    assert(notice:IsShown())
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("update notice opens a reusable bounded dialog with only the fixed manually copyable project URL", function()
+    local c = client({ addonVersion = "1.0.0" })
+    local widgets, notice = openUI(c)
+    for _, control in ipairs(widgets) do if control.guildQueueKind == "updateNotice" then notice = control end end
+    c:receive("Updated-TestRealm", { kind = "V", sentAt = c.now, version = "2.0.0" })
+    notice.scripts.OnClick(notice)
+    local dialog
+    for _, control in ipairs(widgets) do if control.guildQueueKind == "updateDialog" then dialog = control end end
+    assert(dialog and dialog:IsShown())
+    equal(dialog.installedVersion.text, "Installed version: v1.0.0")
+    equal(dialog.newerVersion.text, "Guildmate-reported version: v2.0.0")
+    equal(dialog.link.text, "https://github.com/Kibble/guild-lfg")
+    assert(dialog.link.focused and dialog.link.highlighted and not dialog.link.autoFocus)
+    assert(dialog.link.point[2] + dialog.link:GetWidth() < dialog:GetWidth())
+    equal(c.env.UISpecialFrames[2], "GuildQueueUpdateDialog")
+    dialog.link:SetText("https://example.invalid/not-a-release")
+    dialog.link.scripts.OnTextChanged(dialog.link, true)
+    equal(dialog.link.text, c.ns.UPDATE_URL)
+    c:receive("Updated-TestRealm", { kind = "V", sentAt = c.now, version = "3.0.0" })
+    equal(dialog.newerVersion.text, "Guildmate-reported version: v3.0.0")
+    dialog.link.scripts.OnEscapePressed(dialog.link)
+    assert(not dialog:IsShown())
+    local count = #widgets
+    notice.scripts.OnClick(notice)
+    equal(#widgets, count)
+    dialog.close.scripts.OnClick(dialog.close)
+    assert(not dialog:IsShown())
+    notice.scripts.OnClick(notice)
+    c.env.UIParent:SetSize(400, 240)
+    assert(dialog:GetWidth() * dialog:GetEffectiveScale() <= 400)
+    assert(dialog:GetHeight() * dialog:GetEffectiveScale() <= 240)
+    c.guild = "New Guild"
+    c:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not dialog:IsShown() and not notice:IsShown())
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+test("minimap tooltip receives update evidence while the main window is unopened without taking another tooltip", function()
+    local c = client({ addonVersion = "1.0.0" })
+    local widgets = openUI(c, true)
+    local launcher = c.ns.InitializeMinimap()
+    launcher.scripts.OnEnter(launcher)
+    c:receive("Updated-TestRealm", { kind = "V", sentAt = c.now, version = "2.0.0" })
+    local text = table.concat(c.tooltip.lines, "\n")
+    assert(text:find("Newer version detected: v2.0.0", 1, true))
+    assert(text:find("not verified against GitHub", 1, true))
+    for _, control in ipairs(widgets) do assert(control.frameName ~= "GuildQueueFrame") end
+    local other = {}
+    c.env.GameTooltip:SetOwner(other)
+    c.env.GameTooltip:SetText("Other tooltip")
+    c:receive("Updated-TestRealm", { kind = "V", sentAt = c.now, version = "3.0.0" })
+    equal(c.tooltip.owner, other) equal(c.tooltip.title, "Other tooltip")
+    launcher.scripts.OnEnter(launcher)
+    assert(table.concat(c.tooltip.lines, "\n"):find("v3.0.0", 1, true))
+    c.guild = "New Guild"
+    c:fire("PLAYER_GUILD_UPDATE", "player")
+    assert(not table.concat(c.tooltip.lines, "\n"):find("Newer version detected", 1, true))
     equal(#c.sent, 0) equal(#c.invites, 0)
 end)
 

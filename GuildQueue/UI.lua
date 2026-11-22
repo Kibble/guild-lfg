@@ -2,6 +2,7 @@ local addonName, ns = ...
 local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, dungeonTab, questTab, minimapButton
 local sidebar, queueViewStatus, defaultView, roleView, roleToolbar, roleTitle
 local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
+local guildHint, updateButton, updateDialog
 local expandedQuests = {}
 local roleChecks, dungeonChecks, counters = {}, {}, {}
 local mode, dungeonMode, hovered, pendingScroll = "groups", "groups", nil, nil
@@ -132,6 +133,21 @@ local function showTextTooltip(control)
     GameTooltip:Show()
 end
 
+local function showMinimapTooltip(control)
+    GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Guild Queue")
+    GameTooltip:AddLine("Installed version: " .. (ns.addonVersion and "v" .. ns.SafeText(ns.addonVersion) or "unknown"),
+        1, 1, 1, true)
+    local version = ns.GetUpdateVersion()
+    if version then
+        GameTooltip:AddLine("Newer version detected: v" .. ns.SafeText(version), C.gold[1], C.gold[2], C.gold[3], true)
+        GameTooltip:AddLine("Reported by a guildmate; not verified against GitHub.", C.muted[1], C.muted[2], C.muted[3], true)
+        GameTooltip:AddLine("Open Guild Queue and click the gold version notice for the manual download link.", 1, 1, 1, true)
+    end
+    GameTooltip:AddLine(control.tooltipText, 1, 1, 1, true)
+    GameTooltip:Show()
+end
+
 local function showPartyTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
     GameTooltip:SetText(control.actionLabel or "Create party")
@@ -217,6 +233,82 @@ local function button(parent, text, x, y, width, height, callback, kind)
     bindHover(control, nil, true)
     paint(control)
     return control
+end
+
+local function refreshUpdateNotice()
+    local version = ns.GetUpdateVersion()
+    if updateButton then
+        guildHint:SetShown(version == nil)
+        updateButton:SetShown(version ~= nil)
+        updateButton:SetText(version and "Newer version detected: v" .. ns.SafeText(version) or "")
+    end
+    if updateDialog and updateDialog:IsShown() then
+        if not version then
+            updateDialog:Hide()
+        else
+            updateDialog.installedVersion:SetText("Installed version: "
+                .. (ns.addonVersion and "v" .. ns.SafeText(ns.addonVersion) or "unknown"))
+            updateDialog.newerVersion:SetText("Guildmate-reported version: v" .. ns.SafeText(version))
+        end
+    end
+end
+
+local function showUpdateDialog()
+    if not ns.GetUpdateVersion() then return end
+    if not updateDialog then
+        local dialog = CreateFrame("Frame", "GuildQueueUpdateDialog", UIParent, "BackdropTemplate")
+        updateDialog = dialog
+        dialog.guildQueueKind = "updateDialog"
+        dialog:SetSize(480, 280)
+        dialog:SetPoint("CENTER")
+        dialog:SetFrameStrata("DIALOG")
+        dialog:SetFrameLevel(frame:GetFrameLevel() + 10)
+        dialog:SetClampedToScreen(true)
+        dialog:EnableMouse(true)
+        applyBackdrop(dialog, windowBackdrop)
+        surface(dialog, C.background)
+        label(dialog, "Guild Queue update", 22, 16, 414, 28, "GameFontNormalLarge", C.heading)
+        label(dialog, "Reported by a guildmate; not verified against GitHub.\nNothing is downloaded or installed automatically.",
+            22, 52, 436, 40, nil, C.muted, true)
+        dialog.installedVersion = label(dialog, "", 22, 100, 436, 20, "GameFontNormal", C.text)
+        dialog.installedVersion.guildQueueKind = "updateInstalledVersion"
+        dialog.newerVersion = label(dialog, "", 22, 124, 436, 20, "GameFontNormal", C.gold)
+        dialog.newerVersion.guildQueueKind = "updateReportedVersion"
+        label(dialog, "Copy the link with Ctrl+C, then open it in your browser.\nClose WoW before installing; restart afterward.",
+            22, 158, 436, 38, nil, C.text, true)
+        local link = CreateFrame("EditBox", nil, dialog, "InputBoxTemplate")
+        dialog.link = link
+        link.guildQueueKind = "updateURL"
+        place(link, 22, 207, 436, 28)
+        link:SetAutoFocus(false)
+        link:SetText(ns.UPDATE_URL)
+        -- Keep this a copy-only project link, never peer-provided or user-edited text.
+        link:SetScript("OnTextChanged", function(self, userInput)
+            if userInput then
+                self:SetText(ns.UPDATE_URL)
+                self:HighlightText()
+            end
+        end)
+        link:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        link:SetScript("OnMouseUp", function(self) self:HighlightText() end)
+        link:SetScript("OnEscapePressed", function() dialog:Hide() end)
+        label(dialog, "Fixed project link (manual copy only).", 22, 241, 436, 18, nil, C.muted)
+        dialog.close = button(dialog, "", 446, 4, 32, 32, function() dialog:Hide() end, "close")
+        dialog.close.guildQueueKind = "updateClose"
+        local function fitDialog()
+            dialog:SetScale(math.min(1, UIParent:GetWidth() / 520, UIParent:GetHeight() / 320))
+        end
+        dialog:SetScript("OnShow", function()
+            fitDialog()
+            refreshUpdateNotice()
+        end)
+        UIParent:HookScript("OnSizeChanged", fitDialog)
+        table.insert(UISpecialFrames, "GuildQueueUpdateDialog")
+        dialog:Hide()
+    end
+    updateDialog:Show()
+    updateDialog.link:SetFocus()
+    updateDialog.link:HighlightText()
 end
 
 local function bottomTab(parent, text, previous, callback, tabMode)
@@ -740,6 +832,13 @@ local function renderOutput(players)
 end
 
 function ns.RefreshUI()
+    refreshUpdateNotice()
+    -- Version receipts must update a hovered launcher even before the main window exists.
+    -- Never take ownership back from a different control's tooltip.
+    if minimapButton and hovered == minimapButton and minimapButton:IsShown()
+        and GameTooltip:IsOwned(minimapButton) then
+        showMinimapTooltip(minimapButton)
+    end
     if not frame or not frame:IsShown() then return end
     local questing = mode == "questing"
     sidebar:SetShown(not questing)
@@ -840,7 +939,18 @@ local function createUI()
     if type(version) ~= "string" or version == "" then version = "unknown" end
     label(header, "Guild Queue (v" .. ns.SafeText(version) .. ")", 16, 4, 385, 28, "GameFontNormalHuge", C.heading)
     guildLabel = label(header, "", 16, 34, 430, 18, "GameFontNormal", C.text)
-    label(header, "Guild members with addon seen in the last 75 seconds", 16, 57, 430, 16, nil, C.muted)
+    guildHint = label(header, "Guild members with addon seen in the last 75 seconds", 16, 57, 430, 16, nil, C.muted)
+    guildHint.guildQueueKind = "guildHint"
+    updateButton = CreateFrame("Button", nil, header)
+    updateButton.guildQueueKind = "updateNotice"
+    place(updateButton, 16, 57, 430, 16)
+    updateButton.caption = label(updateButton, "", 0, 0, 430, 16, nil, C.gold)
+    updateButton:SetFontString(updateButton.caption)
+    updateButton.tooltipTitle = "Guildmate-reported update"
+    updateButton.tooltipText = "Not verified against GitHub. Click for version details and a manually copied project link."
+    updateButton:SetScript("OnClick", showUpdateDialog)
+    bindHover(updateButton, showTextTooltip)
+    updateButton:Hide()
     for index, entry in ipairs({ { "queued", "QUEUED" }, { "groups", "GROUPS" },
         { "unmatched", "UNMATCHED" }, { "online", "ADDON ONLINE" } }) do
         local x = 452 + (index - 1) * 94
@@ -1032,7 +1142,7 @@ function ns.InitializeMinimap()
         if dragging then return end
         clearHover()
         hovered = self
-        showTextTooltip(self)
+        showMinimapTooltip(self)
     end)
     control:SetScript("OnLeave", hideTooltip)
     Minimap:HookScript("OnSizeChanged", position)

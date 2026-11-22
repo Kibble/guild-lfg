@@ -13,6 +13,29 @@ local function integer(text, minimum, maximum)
     return value
 end
 
+-- Only canonical stable releases are advertised, never prereleases or URLs.
+function Protocol.VersionParts(version)
+    if type(version) ~= "string" or #version > 14 then return nil end
+    local major, minor, patch = version:match("^(%d+)%.(%d+)%.(%d+)$")
+    local parts = {}
+    for index, part in ipairs({ major, minor, patch }) do
+        local value = integer(part, 0, 9999)
+        if not value or tostring(value) ~= part then return nil end
+        parts[index] = value
+    end
+    if #parts ~= 3 then return nil end
+    return parts
+end
+
+function Protocol.CompareVersions(left, right)
+    local a, b = Protocol.VersionParts(left), Protocol.VersionParts(right)
+    if not a or not b then return nil end
+    for index = 1, 3 do
+        if a[index] ~= b[index] then return a[index] > b[index] and 1 or -1 end
+    end
+    return 0
+end
+
 function Protocol.DungeonList(selected)
     local values = {}
     for _, dungeon in ipairs(ns.DUNGEONS) do
@@ -43,6 +66,9 @@ end
 function Protocol.Encode(packet)
     if packet.kind == "H" or packet.kind == "P" then
         return "1|" .. packet.kind
+    end
+    if packet.kind == "V" then
+        return table.concat({ "1", "V", string.format("%.0f", packet.sentAt), packet.version }, "|")
     end
     if packet.kind == "F" or packet.kind == "U" then
         local parts = { "1", packet.kind, string.format("%.0f", packet.sentAt),
@@ -79,6 +105,11 @@ function Protocol.Decode(message)
         return nil
     end
     local kind = fields[2]
+    if kind == "V" then
+        local sentAt = integer(fields[3], 1, 9999999999)
+        if #fields ~= 4 or not sentAt or not Protocol.VersionParts(fields[4]) then return nil end
+        return { kind = kind, sentAt = sentAt, version = fields[4] }
+    end
     if kind == "F" or kind == "U" then
         local sentAt = integer(fields[3], 1, 9999999999)
         local claimID = integer(fields[4], 1, 9007199254740990)

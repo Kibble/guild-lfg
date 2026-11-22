@@ -21,7 +21,7 @@ local function loadModule(ns, name)
 end
 local function pure()
     local ns = {}
-    for _, module in ipairs({ "Catalog", "Protocol", "State", "Matcher", "Questing" }) do
+    for _, module in ipairs({ "Config", "Catalog", "Protocol", "State", "Matcher", "Questing" }) do
         loadModule(ns, module)
     end
     return ns
@@ -491,6 +491,9 @@ local function client(options)
     if options.noGuild then c.guild = nil end
     local env = setmetatable({}, { __index = _G })
     c.ns, c.env = pure(), env
+    if options.showQueueViewButtons ~= nil then
+        c.ns.Config.showQueueViewButtons = options.showQueueViewButtons
+    end
     c.ns.RefreshUI = function() end
     c.ns.ToggleUI = function() c.toggled = true end
     c.ns.InitializeMinimap = function() c.minimapStarts = (c.minimapStarts or 0) + 1 end
@@ -2963,8 +2966,83 @@ local function roleListUI(c)
     return widgets, views, tabs
 end
 
-test("Role List switch leaves Default matching intact and shows three role columns", function()
+test("config hides both queue view buttons by default across refreshes navigation and reopening", function()
     local c = client()
+    equal(c.ns.Config.showQueueViewButtons, false)
+    c.ns.prefs.showQueueViewButtons = true -- Installation config, not a saved character preference.
+    local widgets, tabs, views = openUI(c), {}, {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+        if control.guildQueueKind == "viewSwitch" then views[control.viewMode] = control end
+    end
+    local function hidden()
+        equal(tabs.groups.shown, false) equal(tabs.queue.shown, false)
+    end
+    hidden()
+    assert(views.default.shown and views.roles.shown and views.default.selected)
+    for _ = 1, 5 do c.ns.RefreshUI() hidden() end
+    views.roles.scripts.OnClick(views.roles) hidden()
+    views.default.scripts.OnClick(views.default) hidden()
+    tabs.questing.scripts.OnClick(tabs.questing) hidden()
+    tabs.dungeons.scripts.OnClick(tabs.dungeons) hidden()
+    assert(views.default.shown and views.roles.shown and views.default.selected)
+    c.ns.ToggleUI() c.ns.ToggleUI() hidden()
+    c:advance(5) hidden()
+    assert(not c.ns.queued and not c.ns.prefs.shareQuests)
+    equal(#c.invites, 0)
+end)
+test("enabling queue view buttons restores All queued rendering and the original visibility rules", function()
+    local c = client({ showQueueViewButtons = true })
+    suggestedGroup(c)
+    local groups, state = c.ns.groups, c.ns.state
+    c.ns.Match = function() error("The feature flag and navigation must not rematch") end
+    local widgets, tabs, views = openUI(c), {}, {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "tab" then tabs[control.mode] = control end
+        if control.guildQueueKind == "viewSwitch" then views[control.viewMode] = control end
+    end
+    assert(tabs.groups.shown and tabs.queue.shown and tabs.groups.selected)
+    tabs.queue.scripts.OnClick(tabs.queue)
+    assert(tabs.groups.shown and tabs.queue.shown and tabs.queue.selected)
+    equal(tabs.queue.text, "All queued (5)")
+    local people, heading = 0, false
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "individual" and control.shown then people = people + 1 end
+        if control.shown and control.title and control.title.text == "All queued guild members (5)" then heading = true end
+        if control.guildQueueKind == "group" then assert(not control.shown) end
+    end
+    equal(people, 5) assert(heading)
+    views.roles.scripts.OnClick(views.roles)
+    assert(not tabs.groups.shown and not tabs.queue.shown)
+    views.default.scripts.OnClick(views.default)
+    assert(tabs.groups.shown and tabs.queue.shown and tabs.queue.selected)
+    tabs.questing.scripts.OnClick(tabs.questing)
+    assert(not tabs.groups.shown and not tabs.queue.shown)
+    tabs.dungeons.scripts.OnClick(tabs.dungeons)
+    assert(tabs.groups.shown and tabs.queue.shown and tabs.queue.selected)
+    tabs.groups.scripts.OnClick(tabs.groups)
+    equal(c.ns.groups, groups) equal(c.ns.state, state)
+    assert(c.ns.queued)
+    equal(#c.invites, 0)
+end)
+test("missing or nonboolean config flags keep queue view buttons hidden without breaking Default", function()
+    for _, flag in ipairs({ "missingConfig", "missingFlag", "true", "false", 1 }) do
+        local c = client()
+        if flag == "missingConfig" then c.ns.Config = nil
+        elseif flag == "missingFlag" then c.ns.Config = {}
+        else c.ns.Config.showQueueViewButtons = flag end
+        local views = {}
+        for _, control in ipairs(openUI(c)) do
+            if control.guildQueueKind == "tab" and not control.mainTab then equal(control.shown, false) end
+            if control.guildQueueKind == "viewSwitch" then views[control.viewMode] = control end
+        end
+        assert(views.default.shown and views.roles.shown and views.default.selected)
+        equal(#c.sent, 0) equal(#c.invites, 0)
+    end
+end)
+
+test("Role List switch leaves Default matching intact and shows three role columns", function()
+    local c = client({ showQueueViewButtons = true })
     suggestedGroup(c)
     local original = c.ns.groups
     c.ns.Match = function() error("Switching views must not rematch") end
@@ -3088,7 +3166,7 @@ test("Role List pooled cards never invite a withdrawn former occupant", function
     equal(c.invites[1], "Second-TestRealm")
 end)
 test("Role List Default and Quests retain independent scrolling and the last default subview", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     for i = 1, 30 do c:receive("P" .. i .. "-TestRealm", packet(1, 4, nil, c.now, c.now)) end
     local widgets, views, tabs = roleListUI(c)
     local scroll
@@ -3627,7 +3705,7 @@ test("Quests prominently labels same-zone guildmates without overlapping control
     equal(#c.invites, 0)
 end)
 test("Questing tab shows unknown versus zero shared quests and expands completion details", function()
-    local c = client({ quests = { { questID = 10, title = "A shared quest" } },
+    local c = client({ showQueueViewButtons = true, quests = { { questID = 10, title = "A shared quest" } },
         rosterInfo = { ["Friend-TestRealm"] = { area = "Elwynn Forest" } } })
     local widgets = openUI(c)
     local tabs, consent = {}
@@ -3731,7 +3809,7 @@ test("Questing tab retains independent scrolling and keeps expanded text within 
         quests[#quests + 1] = { questID = id, title = "Shared quest " .. id }
         peer[id] = false
     end
-    local c = client({ quests = quests })
+    local c = client({ quests = quests, showQueueViewButtons = true })
     receiveQuests(c, "Friend-TestRealm", peer)
     local widgets, tabs, scroll, card = openUI(c), {}
     for _, control in ipairs(widgets) do
@@ -3755,7 +3833,7 @@ test("Questing tab retains independent scrolling and keeps expanded text within 
     end
 end)
 test("UI opens and its multi-select controls drive the real queue", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     local widgets = openUI(c)
     local checks, join, queueTab = {}
     for _, control in ipairs(widgets) do
@@ -3925,7 +4003,7 @@ test("Invite Others does not trust eligibility rendered before a party change", 
 end)
 
 test("Create party controls hide on the all-queued tab without issuing invites", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     suggestedGroup(c)
     local widgets = openUI(c)
     local control, queueTab
@@ -4059,7 +4137,7 @@ test("pooled group tiles reset occupied and needed states as a match shrinks and
     equal(#c.invites, 0)
 end)
 test("partial party actions hide on All queued and return without sending invitations", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     suggestedPartial(c, 2)
     local widgets = openUI(c)
     local party, tabs = nil, {}
@@ -4113,7 +4191,7 @@ test("own suggested group renders five assigned member tiles and a click-only ac
     equal(#c.invites, 0)
 end)
 test("unmatched and all-queued cards reuse widgets across repeated refreshes", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     c.ns.SetQueued(true)
     c:advance(1)
     c:receive("Friend-TestRealm", packet(1, 4, { [2] = true }, c.now, c.now))
@@ -4134,7 +4212,7 @@ test("unmatched and all-queued cards reuse widgets across repeated refreshes", f
     equal(#c.invites, 0)
 end)
 test("custom queue scrolling clamps to content and preserves each tab's position", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     for i = 1, 30 do
         c:receive("Player" .. i .. "-TestRealm", packet(1, 4, nil, c.now, c.now))
     end
@@ -4378,7 +4456,7 @@ test("Auction House-style bottom tabs are Dungeons then Quests and swap entire p
     equal(scroll:GetHeight(), 574)
     equal(scroll.content:GetWidth(), 1006)
     tabs.dungeons.scripts.OnClick(tabs.dungeons)
-    assert(sidebar.shown and tabs.groups.shown and tabs.queue.shown)
+    assert(sidebar.shown and not tabs.groups.shown and not tabs.queue.shown)
     equal(scroll.point[2], 296)
     equal(scroll:GetHeight(), 530)
     assert(c.ns.queued and not c.ns.prefs.shareQuests)
@@ -4450,7 +4528,7 @@ test("bottom tabs change color without changing artwork bounds or label position
     equal(#c.invites, 0)
 end)
 test("returning from Quests preserves the selected dungeon view and scroll position", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     for index = 1, 30 do
         c:receive("D" .. index .. "-TestRealm", packet(1, 4, nil, c.now, c.now))
     end
@@ -4470,7 +4548,7 @@ test("returning from Quests preserves the selected dungeon view and scroll posit
     assert(tabs.dungeons.nativeSelected)
 end)
 test("native tab buttons keep the active view pressed", function()
-    local c = client()
+    local c = client({ showQueueViewButtons = true })
     local widgets = openUI(c)
     local tabs = {}
     for _, control in ipairs(widgets) do
@@ -4487,7 +4565,7 @@ test("native tab buttons keep the active view pressed", function()
 end)
 
 test("all addon chunks compile as Lua 5.1", function()
-    for _, module in ipairs({ "Catalog", "Protocol", "State", "Matcher", "Questing", "UI", "Core" }) do
+    for _, module in ipairs({ "Config", "Catalog", "Protocol", "State", "Matcher", "Questing", "UI", "Core" }) do
         assert(loadfile("GuildQueue/" .. module .. ".lua"))
     end
 end)

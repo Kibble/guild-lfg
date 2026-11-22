@@ -934,9 +934,10 @@ function ns.RefreshUI()
     end
     if not frame or not frame:IsShown() then return end
     local questing = mode == "questing"
+    local showQueueViewButtons = type(ns.Config) == "table" and ns.Config.showQueueViewButtons == true
     sidebar:SetShown(not questing)
-    groupsTab:SetShown(not questing and mode ~= "roles")
-    queueTab:SetShown(not questing and mode ~= "roles")
+    groupsTab:SetShown(showQueueViewButtons and not questing and mode ~= "roles")
+    queueTab:SetShown(showQueueViewButtons and not questing and mode ~= "roles")
     roleTitle:SetShown(mode == "roles")
     defaultView:SetShown(not questing)
     roleView:SetShown(not questing)

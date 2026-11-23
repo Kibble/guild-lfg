@@ -115,6 +115,10 @@ local function nativeGrouped()
     return home == true or instance == true
 end
 
+function ns.UsesPartyRoles()
+    return (ns.queued and queueMode == "party") or nativeGrouped()
+end
+
 function ns.QueueButtonText()
     if ns.queued then return queueMode == "party" and "Leave party queue" or "Leave queue" end
     return nativeGrouped() and "Queue party" or "Join queue"

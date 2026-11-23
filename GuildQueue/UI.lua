@@ -3,6 +3,7 @@ local frame, status, guildLabel, queueStatus, joinButton, groupsTab, queueTab, d
 local sidebar, queueViewStatus, defaultView, roleView, roleToolbar, roleTitle
 local outputScroll, dungeonScroll, selectionCount, questToolbar, questZone, shareQuests
 local guildHint, updateButton, updateDialog
+local rolePrompt, roleHint, partyRoleHeading, partyRoleHint
 local expandedQuests = {}
 local roleChecks, dungeonChecks, counters = {}, {}, {}
 local mode, dungeonMode, hovered, pendingScroll = "groups", "groups", nil, nil
@@ -973,8 +974,14 @@ function ns.RefreshUI()
     -- Leaving must remain possible when identity/transport/selections are unavailable.
     joinButton:SetEnabled(ns.queued or ns.JoinQueueDisabledReason() == nil)
     paint(joinButton)
-    local queueRoles = ns.QueueRoles()
+    local partyRoles, queueRoles = ns.UsesPartyRoles(), ns.QueueRoles()
+    rolePrompt:SetShown(not partyRoles)
+    roleHint:SetShown(not partyRoles)
+    partyRoleHeading:SetShown(partyRoles)
+    partyRoleHint:SetShown(partyRoles)
     for role, control in pairs(roleChecks) do
+        -- Hide also clears an owned role tooltip during a solo-to-party change.
+        if partyRoles then control:Hide() else control:Show() end
         local reason = ns.RoleDisabledReason(role)
         control:SetEnabled(reason == nil)
         control.tooltipText = reason or "Select one or more roles available for your class."
@@ -1073,8 +1080,15 @@ local function createUI()
     sidebar = panel(frame, 18, 112, 260, 574, C.panel)
     sidebar.guildQueueKind = "dungeonSidebar"
     label(sidebar, "YOUR QUEUE", 14, 12, 230, 18, "GameFontNormalSmall", C.heading)
-    label(sidebar, "Play as", 14, 36, 105, 22, "GameFontNormalLarge", C.text)
-    label(sidebar, "Choose 1 or more", 122, 39, 124, 18, nil, C.muted)
+    rolePrompt = label(sidebar, "Play as", 14, 36, 105, 22, "GameFontNormalLarge", C.text)
+    roleHint = label(sidebar, "Choose 1 or more", 122, 39, 124, 18, nil, C.muted)
+    partyRoleHeading = label(sidebar, "Party roles", 14, 36, 232, 22, "GameFontNormalLarge", C.text)
+    partyRoleHeading.guildQueueKind = "partyRoleHeading"
+    partyRoleHint = label(sidebar,
+        "Set each member's role in WoW's party controls.\n\nGuild Queue uses those assignments automatically.",
+        14, 66, 232, 76, "GameFontHighlightSmall", C.muted, true)
+    partyRoleHint.guildQueueKind = "partyRoleHint"
+    partyRoleHint:SetJustifyV("TOP")
     for index, role in ipairs({ 1, 2, 4 }) do
         local control = check(sidebar, ns.ROLE_NAMES[role], 12 + (index - 1) * 80, 64, 76, 76,
             function(self)

@@ -96,13 +96,13 @@ test("a non-guild leader still cannot publish a party to the guild channel", fun
     c:advance(10) equal(#c.sent, 0) equal(#c.ns.state:Sorted(), 0)
 end)
 
-test("party UI shows assigned roles without changing saved solo preferences", function()
+test("party UI hides addon role selection without changing saved solo preferences", function()
     local c = party({ saved = { roles = 6, dungeons = { [1] = true } } })
     local join, roles = controls(c)
     equal(join.text, "Queue party") assert(join.enabled)
     equal(c.ns.QueueRoles(), 1)
     for role, control in pairs(roles) do
-        assert(not control.enabled)
+        assert(not control.enabled and not control.shown)
         equal(control:GetChecked(), role == 1)
     end
     roles[4]:SetChecked(true) roles[4].scripts.OnClick(roles[4])
@@ -112,6 +112,94 @@ test("party UI shows assigned roles without changing saved solo preferences", fu
     join.scripts.OnClick(join)
     equal(join.text, "Queue party") equal(c.ns.prefs.roles, 6)
     equal(#c.ns.state:Sorted(), 0) equal(#c.invites, 0)
+end)
+
+test("party role messaging replaces controls before queueing and during queued or paused updates", function()
+    local c = party()
+    local _, roles, widgets = controls(c)
+    local heading, hint, prompt, choose
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "partyRoleHeading" then heading = control end
+        if control.guildQueueKind == "partyRoleHint" then hint = control end
+        if control.text == "Play as" then prompt = control end
+        if control.text == "Choose 1 or more" then choose = control end
+    end
+    assert(heading and hint and prompt and choose)
+    local function replaced()
+        assert(heading.shown and hint.shown and not prompt.shown and not choose.shown)
+        for _, control in pairs(roles) do assert(not control.shown) end
+    end
+    replaced()
+    equal(heading.text, "Party roles")
+    assert(hint.text:find("WoW's party controls", 1, true))
+    assert(hint.text:find("automatically", 1, true))
+    -- Text replaces only the existing role area, above the divider at y=156.
+    for _, control in ipairs({ heading, hint }) do
+        assert(control.point[2] >= 14)
+        assert(control.point[2] + control:GetWidth() <= control.parent:GetWidth())
+        assert(-control.point[3] + control:GetHeight() < 156)
+    end
+    assert(hint:GetStringHeight() <= hint:GetHeight())
+    local count = #widgets
+    for _ = 1, 10 do c.ns.RefreshUI() replaced() end
+    equal(#widgets, count)
+    queued(c) replaced()
+    c.partyRoles.party1 = "NONE" c:fire("PLAYER_ROLES_ASSIGNED")
+    assert(c.ns.queued and c.ns.QueueUpdatePending()) replaced()
+    local groupAPI = c.env.IsInGroup
+    c.env.IsInGroup = function() return nil end
+    c:fire("GROUP_ROSTER_UPDATE") replaced() -- Pending party intent still uses WoW roles.
+    c.env.IsInGroup = groupAPI
+    c.ns.SetQueued(false) replaced() -- Still in a native party, so no addon role editing.
+    equal(#c.invites, 0)
+end)
+
+test("leaving a party restores saved solo role controls and clears the old role tooltip on grouping", function()
+    local c = client({ saved = { roles = 6, dungeons = { [1] = true } } })
+    local _, roles, widgets = controls(c)
+    local prompt, choose, heading, hint
+    for _, control in ipairs(widgets) do
+        if control.text == "Play as" then prompt = control end
+        if control.text == "Choose 1 or more" then choose = control end
+        if control.guildQueueKind == "partyRoleHeading" then heading = control end
+        if control.guildQueueKind == "partyRoleHint" then hint = control end
+    end
+    for _ = 1, 2 do
+        assert(not c.ns.UsesPartyRoles())
+        assert(prompt.shown and choose.shown and not heading.shown and not hint.shown)
+        assert(roles[2].shown and roles[2].enabled and roles[2]:GetChecked())
+        assert(roles[4].shown and roles[4]:GetChecked() and not roles[1]:GetChecked())
+        roles[2].scripts.OnEnter(roles[2]) assert(c.tooltip.shown)
+        c.homeGroup, c.partyMembers = true, { "Guest-OtherRealm" }
+        c.partyRoles = { player = "TANK", party1 = "HEALER" }
+        c:fire("GROUP_ROSTER_UPDATE")
+        assert(c.ns.UsesPartyRoles() and heading.shown and hint.shown)
+        assert(not roles[2].shown and not c.tooltip.shown)
+        equal(c.ns.prefs.roles, 6)
+        c.homeGroup, c.partyMembers = false, {}
+        c:fire("GROUP_ROSTER_UPDATE")
+    end
+    assert(prompt.shown and choose.shown and not heading.shown and not hint.shown)
+    equal(c.ns.prefs.roles, 6)
+    assert(not c.ns.queued)
+    equal(#c.sent, 0) equal(#c.invites, 0)
+end)
+
+test("nonleaders and members with unassigned roles also see WoW party role instructions instead of checkboxes", function()
+    for _, options in ipairs({ { partyLeader = false }, { roleAssignedUnavailable = true } }) do
+        local c = party(options)
+        local join, roles, widgets = controls(c)
+        assert(not join.enabled)
+        local heading, hint
+        for _, control in ipairs(widgets) do
+            if control.guildQueueKind == "partyRoleHeading" then heading = control end
+            if control.guildQueueKind == "partyRoleHint" then hint = control end
+        end
+        assert(heading.shown and hint.shown)
+        for _, control in pairs(roles) do assert(not control.shown and not control.enabled) end
+        assert(not c.ns.queued)
+        equal(#c.sent, 0) equal(#c.invites, 0)
+    end
 end)
 
 test("party queue uses assigned roles even when the solo class role API is unavailable", function()

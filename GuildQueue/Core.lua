@@ -23,7 +23,7 @@ local FORMATION_CACHE_LIMIT, FORMATION_RACE_WINDOW = 256, 5
 ns.FORMATION_TIMEOUT = 10
 ns.queued = false
 ns.state = ns.State.New()
-ns.groups, ns.individuals = {}, {}
+ns.groups, ns.individuals, ns.matchOptions = {}, {}, {}
 ns.questing = ns.Questing.New()
 local guildMembers, localQuests, questTitles = {}, nil, {}
 local localZoneID, localZoneName, localLevel = 0, "", 0
@@ -265,6 +265,7 @@ end
 
 local function rebuild()
     ns.groups, ns.individuals = ns.Match(ns.state)
+    ns.matchOptions = ns.PartyMatchOptions(ns.state)
     refreshFormationIndexes()
     ns.RefreshUI()
 end
@@ -371,14 +372,19 @@ function ns.PartyQueueLeader()
     end
 end
 
-local function matchupFingerprint(group, now)
+local function matchupFingerprint(group, now, records, hashCache)
     if type(group) ~= "table" or type(group.members) ~= "table"
         or #group.members < 2 or #group.members > 5 then return nil end
     local members, seen = {}, {}
     for _, member in ipairs(group.members) do
         local name = type(member) == "table" and normalize(member.name)
-        local record = name and freshQueueRecord(name, now)
-        if not record or #name > 128 or name:find("[%c%s|]") or seen[name:lower()]
+        local record
+        if name then
+            if records then record = records[name:lower()]
+            else record = freshQueueRecord(name, now) end
+        end
+        if not queueRecordFresh(record, now) or record.name:lower() ~= name:lower()
+            or #name > 128 or name:find("[%c%s|]") or seen[name:lower()]
             or not boundedNumber(record.joinedAt, 1, record.sentAt) then return nil end
         local key = name:lower()
         seen[key] = true
@@ -403,25 +409,48 @@ local function matchupFingerprint(group, now)
         parts[#parts + 1] = table.concat(ids, ",")
     end
     local text, first, second = table.concat(parts, "|"), 0, 0
+    if hashCache and hashCache[text] then return hashCache[text], seen, text end
     for index = 1, #text do
         local byte = text:byte(index)
         -- Both products stay below 2^53, including on Lua's double numbers.
         first = (first * 131 + byte) % 2147483647
         second = (second * 65599 + byte) % 2147483647
     end
-    return string.format("%08x%08x", first, second), seen
+    local key = string.format("%08x%08x", first, second)
+    if hashCache then hashCache[text] = key end
+    return key, seen, text
 end
 
 local function currentMatchup(subject, now)
-    local entry
     if type(subject) == "table" then
-        entry = matchupByGroup[subject]
+        local indexed = matchupByGroup[subject]
+        local entry = indexed and indexed.entry
+        if not entry or matchupByKey[entry.key] ~= entry
+            or subject.dungeonID ~= indexed.dungeonID or subject.dungeonOption ~= indexed.dungeonOption
+            or subject.partyLeader ~= indexed.partyLeader then return nil end
+        local key, _, source = matchupFingerprint(subject, now)
+        if key == entry.key and source == entry.source then return entry end
     elseif type(subject) == "string" then
         local name = normalize(subject)
-        entry = name and matchupByPlayer[name:lower()]
+        local entries = name and matchupByPlayer[name:lower()] or {}
+        local own = ns.playerName and ns.playerName:lower()
+        -- Main suggestions precede deterministic alternatives. Reuse an active
+        -- own claim containing the target; otherwise prefer any own matchup.
+        local fallback, containingOwn
+        for _, entry in ipairs(entries) do
+            if currentMatchup(entry.group, now) then
+                fallback = fallback or entry
+                if own and entry.members[own] then
+                    containingOwn = containingOwn or entry
+                    local active = formationByOwner[own]
+                    if active and not active.released and active.deadline > now and active.key == entry.key then
+                        return entry
+                    end
+                end
+            end
+        end
+        return containingOwn or fallback
     end
-    if entry and matchupByKey[entry.key] == entry
-        and matchupFingerprint(entry.group, now) == entry.key then return entry end
 end
 
 function ns.MatchupKey(group)
@@ -429,16 +458,25 @@ function ns.MatchupKey(group)
     return entry and entry.key
 end
 
-local function formationWinner(entry, now)
+local function overlaps(left, right)
+    for name in pairs(left) do if right[name] then return true end end
+    return false
+end
+
+local function earlierClaim(claim, winner)
+    return not winner or claim.sentAt < winner.sentAt
+        or (claim.sentAt == winner.sentAt and (claim.owner:lower() < winner.owner:lower()
+            or (claim.owner:lower() == winner.owner:lower() and claim.claimID < winner.claimID)))
+end
+
+local function formationWinner(entry, now, extraMembers)
     local winner
-    for _, claim in pairs(formationClaims[entry.key] or {}) do
-        if claim.deadline > now and not claim.released and entry.members[claim.owner:lower()]
-            and (not entry.partyLeader or entry.partyLeader:lower() == claim.owner:lower())
-            and (not winner or claim.sentAt < winner.sentAt
-                or (claim.sentAt == winner.sentAt and (claim.owner:lower() < winner.owner:lower()
-                    or (claim.owner:lower() == winner.owner:lower() and claim.claimID < winner.claimID)))) then
-            winner = claim
-        end
+    for _, claim in pairs(formationByOwner) do
+        local claimed = matchupByKey[claim.key]
+        if claim.deadline > now and not claim.released and claimed and currentMatchup(claimed.group, now)
+            and ((entry and overlaps(entry.members, claimed.members))
+                or (extraMembers and overlaps(extraMembers, claimed.members)))
+            and earlierClaim(claim, winner) then winner = claim end
     end
     return winner
 end
@@ -447,10 +485,17 @@ function ns.FormationStatus(subject)
     if not ns.IsReady() then return nil end
     local now = GetServerTime()
     local entry = currentMatchup(subject, now)
-    local winner = entry and formationWinner(entry, now)
+    local extraMembers
+    if type(subject) == "string" then
+        local name = normalize(subject)
+        if name then extraMembers = { [name:lower()] = true, [ns.playerName:lower()] = true } end
+    end
+    local winner = formationWinner(entry, now, extraMembers)
     if winner then
         return { owner = winner.owner, remaining = math.ceil(winner.deadline - now),
-            isOwner = winner.owner:lower() == ns.playerName:lower(), key = entry.key }
+            isOwner = winner.owner:lower() == ns.playerName:lower(), key = winner.key,
+            -- Own alternative cards still form a conflict unless this key agrees.
+            sameMatchup = entry ~= nil and entry.key == winner.key }
     end
 end
 
@@ -461,8 +506,9 @@ function ns.FormationDisabledReason(subject)
         return "Only the queued party's leader can invite this matchup."
     end
     local status = ns.FormationStatus(subject)
-    if status and not status.isOwner then
-        return ns.SafeText(status.owner) .. " is inviting this matchup (" .. status.remaining .. "s remaining).", status
+    if status and (not status.isOwner or not status.sameMatchup) then
+        return ns.SafeText(status.owner) .. (status.sameMatchup and " is inviting this matchup ("
+            or " is inviting an overlapping match option (") .. status.remaining .. "s remaining).", status
     end
     return nil, status
 end
@@ -502,25 +548,43 @@ end
 
 refreshFormationIndexes = function()
     queueRecordNames, matchupByGroup, matchupByKey, matchupByPlayer = {}, {}, {}, {}
+    -- One immutable read for this synchronous indexing pass. Live click checks
+    -- still reread state; many dungeon aliases need not repeatedly sort it.
+    local records, hashCache = {}, {}
     for _, record in ipairs(ns.state:Sorted()) do
         local name = record.name
         local lower = name:lower()
-        if queueRecordNames[lower] ~= nil then queueRecordNames[lower] = false
-        else queueRecordNames[lower] = name end
+        if queueRecordNames[lower] ~= nil then
+            queueRecordNames[lower], records[lower] = false, false
+        else
+            queueRecordNames[lower], records[lower] = name, record
+        end
     end
     local now = GetServerTime()
-    for _, group in ipairs(ns.groups) do
-        local key, members = matchupFingerprint(group, now)
-        if key then
-            local entry = { group = group, key = key, members = members }
-            for name in pairs(members) do
-                local record = freshQueueRecord(name, now)
-                if record and record.partyLeader then entry.partyLeader = record.partyLeader end
+    for _, groups in ipairs({ ns.groups, ns.matchOptions }) do
+        for _, group in ipairs(groups) do
+            local key, members, source = matchupFingerprint(group, now, records, hashCache)
+            if key then
+                local entry = matchupByKey[key]
+                -- Selected dungeon is intentionally absent from the legacy key.
+                -- Identical semantic sources alias; real hash collisions fail closed.
+                if entry ~= nil and (not entry or entry.source ~= source) then
+                    matchupByKey[key] = false
+                else
+                    if not entry then
+                        entry = { group = group, key = key, members = members, source = source }
+                        for name in pairs(members) do
+                            local record = records[name]
+                            if record and record.partyLeader then entry.partyLeader = record.partyLeader end
+                            matchupByPlayer[name] = matchupByPlayer[name] or {}
+                            table.insert(matchupByPlayer[name], entry)
+                        end
+                        matchupByKey[key] = entry
+                    end
+                    matchupByGroup[group] = { entry = entry, dungeonID = group.dungeonID,
+                        dungeonOption = group.dungeonOption, partyLeader = group.partyLeader }
+                end
             end
-            matchupByGroup[group] = entry
-            if matchupByKey[key] ~= nil then matchupByKey[key] = false
-            else matchupByKey[key] = entry end
-            for name in pairs(members) do matchupByPlayer[name] = entry end
         end
     end
     pruneFormations(now)
@@ -535,8 +599,10 @@ local function activateFormation(owner, packet, entry)
     formationClaims[claim.key] = formationClaims[claim.key] or {}
     formationClaims[claim.key][lower], formationByOwner[lower] = claim, claim
     if winner and claim.sentAt < winner.sentAt then
-        for _, contender in pairs(formationClaims[claim.key]) do
-            if contender.sentAt > claim.sentAt + FORMATION_RACE_WINDOW then retireFormation(contender) end
+        for _, contender in pairs(formationByOwner) do
+            local other = matchupByKey[contender.key]
+            if other and overlaps(entry.members, other.members)
+                and contender.sentAt > claim.sentAt + FORMATION_RACE_WINDOW then retireFormation(contender) end
         end
     end
     return claim
@@ -596,8 +662,7 @@ end
 local function actionMatchup(subject)
     local now = GetServerTime()
     local entry = currentMatchup(subject, now)
-    local own = ns.playerName and currentMatchup(ns.playerName, now)
-    if entry and entry == own then return entry end
+    if entry and ns.playerName and entry.members[ns.playerName:lower()] then return entry end
 end
 
 local function formationActionDisabledReason(subject)
@@ -607,7 +672,7 @@ local function formationActionDisabledReason(subject)
     end
     local reason, status = ns.FormationDisabledReason(subject)
     if reason then return reason end
-    if not actionMatchup(subject) or (status and status.isOwner) then return nil end
+    if not actionMatchup(subject) or (status and status.isOwner and status.sameMatchup) then return nil end
     local remaining = 5 - (GetTime() - lastFormationFailure)
     if remaining > 0 then
         return "Matchup announcement could not be sent. Retry in " .. math.ceil(remaining) .. "s."
@@ -626,7 +691,9 @@ local function beginFormation(subject)
     if winner and winner.owner:lower() == ns.playerName:lower() then return winner, false end
     pruneFormations(GetServerTime())
     local previous = formationWatermarks[ns.playerName:lower()]
-    local replacesID = previous and previous.key == entry.key and previous.released and previous.claimID or 0
+    -- A failed explicit click may retry a different option. Name its released
+    -- token too, so a lost/reordered U cannot discard the successful retry.
+    local replacesID = previous and previous.released and previous.claimID or 0
     local packet = { kind = "F", sentAt = GetServerTime(), claimID = nextRevision(), matchupKey = entry.key,
         replacesID = replacesID }
     -- Install before sending: a synchronous delivery may introduce a competing
@@ -640,7 +707,8 @@ local function beginFormation(subject)
         return nil, false, "Matchup announcement could not be sent. No invitations were requested; retry in 5s."
     end
     local status = ns.FormationStatus(subject)
-    if not status or not status.isOwner or status.key ~= claim.key or claim.guildKey ~= ns.guildKey then
+    if not status or not status.isOwner or not status.sameMatchup
+        or status.key ~= claim.key or claim.guildKey ~= ns.guildKey then
         releaseFormation(claim)
         return nil, false, ns.FormationDisabledReason(subject) or "This suggested matchup changed. Try again."
     end
@@ -804,7 +872,7 @@ function ns.CreatePartyDisabledReason(group)
     if not ns.IsReady() then
         return "Your guild queue is not ready yet."
     end
-    if not matchupByGroup[group] then
+    if not currentMatchup(group, GetServerTime()) then
         return "This suggested group has changed. Wait for the queue to refresh."
     end
     local formationReason = ns.FormationDisabledReason(group)
@@ -957,9 +1025,13 @@ function ns.CreateParty(group)
         if snapshot.homeGroup and (safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) ~= true
             or safeCall(C_PartyInfo.CanInvite) ~= true
             or safeCall(C_PartyInfo.IsPartyFull, LE_PARTY_CATEGORY_HOME) ~= false) then break end
-        lastMemberInviteAt[name:lower()] = GetTime()
-        local ok, result = pcall(C_PartyInfo.InviteUnit, name)
-        if ok and result ~= false then requested = requested + 1 end
+        if snapshot.present[name:lower()] then
+            requested = requested + 1
+        else
+            lastMemberInviteAt[name:lower()] = GetTime()
+            local ok, result = pcall(C_PartyInfo.InviteUnit, name)
+            if ok and result ~= false then requested = requested + 1 end
+        end
     end
     -- A synchronous roster event may occur inside InviteUnit. Only this
     -- already-authorized transition waits until the explicit batch finishes.
@@ -1287,7 +1359,13 @@ end
 
 -- Called only after the explicit click has revalidated its target.
 local function requestMemberInvite(target, requestedRole, questInvite)
+    local chosen = actionMatchup(target)
     local claim, isNew, reason = beginFormation(target)
+    -- Bind the click to its chosen option even if a callback rematches the queue.
+    if not reason and chosen and (not claim or claim.key ~= chosen.key
+        or currentMatchup(chosen.group, GetServerTime()) ~= chosen) then
+        reason = "This suggested matchup changed. Wait for the queue to refresh."
+    end
     -- Revalidate after the synchronous announcement, including foreign winners.
     if not reason then
         if questInvite then reason = ns.QuestInviteDisabledReason(target)

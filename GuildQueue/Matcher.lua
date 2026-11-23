@@ -163,6 +163,26 @@ local function partiesIn(players)
     return valid
 end
 
+-- Independent alternatives for each queued party and selected dungeon. These
+-- do not consume players from the main suggestions or reserve any recruits.
+-- Keep only options with at least one compatible player outside the party.
+function ns.PartyMatchOptions(state)
+    local players, options = state:Sorted(), {}
+    for _, party in ipairs(partiesIn(players)) do
+        for _, dungeon in ipairs(ns.DUNGEONS) do
+            local candidate = partyCandidate(players, {}, dungeon.id, party)
+            if candidate and #candidate.members > #party then
+                candidate.dungeons = { [dungeon.id] = true }
+                candidate.partyLeader = party[1].partyLeader
+                candidate.dungeonOption = true
+                options[#options + 1] = candidate
+            end
+        end
+    end
+    table.sort(options, earlier)
+    return options
+end
+
 -- Pure, deterministic function: same live queue -> same suggestions on every client.
 -- Prefer larger groups, then older feasible candidates. Not a global packing optimizer.
 function ns.Match(state)

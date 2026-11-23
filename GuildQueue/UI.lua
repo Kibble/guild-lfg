@@ -600,7 +600,8 @@ local function renderGroup(group, index, own, y)
     local count = #group.members
     card.matched:SetText(count .. " / 5 matched")
     colorText(card.matched, count == 5 and C.green or C.heading)
-    card.kicker:SetText(own and (count < 5 and "YOUR PARTIAL MATCH" or "YOUR SUGGESTED GROUP")
+    card.kicker:SetText(own and (group.dungeonOption and "YOUR DUNGEON MATCH OPTION"
+        or (count < 5 and "YOUR PARTIAL MATCH" or "YOUR SUGGESTED GROUP"))
         or ("SUGGESTED GROUP " .. index))
     local dungeon = ns.DUNGEON_BY_ID[group.dungeonID]
     local title = dungeon and ns.DungeonName(dungeon) or "Shared dungeon"
@@ -650,7 +651,7 @@ local function renderGroup(group, index, own, y)
         control.group = group
         local reason, _, existingParty = ns.CreatePartyDisabledReason(group)
         local formation = ns.FormationStatus(group)
-        local forming = formation and not formation.isOwner
+        local forming = formation and (not formation.isOwner or not formation.sameMatchup)
         control.actionLabel = forming and "Forming..." or existingParty and "Invite Others" or "Create party"
         control:SetText(control.actionLabel)
         if forming then
@@ -782,7 +783,8 @@ local function renderRoleList()
             local formation = ns.FormationStatus(player.name)
             inParty = inParty or entry.inParty
             card.invite.actionLabel = player.name == ns.playerName and "You"
-                or inParty and "In party" or formation and not formation.isOwner and "Forming..."
+                or inParty and "In party" or formation
+                    and (not formation.isOwner or not formation.sameMatchup) and "Forming..."
                 or ("Invite as " .. ns.ROLE_NAMES[role])
             card.invite:SetText(card.invite.actionLabel)
             card.invite:SetEnabled(disabled == nil)
@@ -830,7 +832,8 @@ local function renderQuesting()
         card.invite.memberName = member.name
         local reason, _, inParty = ns.QuestInviteDisabledReason(member.name)
         local formation = ns.FormationStatus(member.name)
-        card.invite.actionLabel = inParty and "In party" or formation and not formation.isOwner and "Forming..." or "Invite"
+        card.invite.actionLabel = inParty and "In party" or formation
+            and (not formation.isOwner or not formation.sameMatchup) and "Forming..." or "Invite"
         card.invite:SetText(card.invite.actionLabel)
         card.invite:SetEnabled(reason == nil)
         paint(card.invite)
@@ -883,14 +886,30 @@ local function renderOutput(players)
     elseif mode == "roles" then
         y = renderRoleList()
     elseif mode == "groups" then
-        local ownIndex
+        local ownIndex, partyLeader
+        for _, player in ipairs(players) do
+            if player.name == ns.playerName then partyLeader = player.partyLeader break end
+        end
+        local options, shown = {}, {}
+        for _, group in ipairs(ns.matchOptions or {}) do
+            if partyLeader and group.partyLeader:lower() == partyLeader:lower() then
+                options[#options + 1] = group
+                for _, player in ipairs(group.members) do shown[player.name:lower()] = true end
+            end
+        end
         for index, group in ipairs(ns.groups) do
             if includesPlayer(group) then
                 ownIndex = index
                 break
             end
         end
-        if ownIndex then y = renderGroup(ns.groups[ownIndex], ownIndex, true, y) end
+        if #options > 0 then
+            y = heading("Your dungeon match options (" .. #options .. ")",
+                "Alternatives may share players - choose one", y)
+            for index, group in ipairs(options) do y = renderGroup(group, index, true, y) end
+        elseif ownIndex then
+            y = renderGroup(ns.groups[ownIndex], ownIndex, true, y)
+        end
         if #ns.groups == 0 then
             y = emptyCard("No compatible matches yet",
                 "Two or more players need a shared dungeon and compatible role slots. "
@@ -903,13 +922,20 @@ local function renderOutput(players)
                 if index ~= ownIndex then y = renderGroup(group, index, false, y) end
             end
         end
-        y = heading("Unmatched individuals (" .. #ns.individuals .. ")", "Waiting for a compatible group", y)
-        if #ns.individuals == 0 then
-            y = emptyCard("No unmatched individuals", #players == 0
+        local individuals = {}
+        for _, player in ipairs(ns.individuals) do
+            if not shown[player.name:lower()] then individuals[#individuals + 1] = player end
+        end
+        y = heading((#options > 0 and "Other queued individuals (" or "Unmatched individuals (")
+            .. #individuals .. ")", #options > 0 and "Not shown in your dungeon options"
+                or "Waiting for a compatible group", y)
+        if #individuals == 0 then
+            y = emptyCard(#options > 0 and "No other individuals" or "No unmatched individuals", #players == 0
                 and "No one is queued yet. Select your roles and dungeons to join."
-                or "Everyone queued is in a suggested group.", y)
+                or (#options > 0 and "Available individuals are already shown in your match options."
+                    or "Everyone queued is in a suggested group."), y)
         else
-            y = renderPeople(ns.individuals, y)
+            y = renderPeople(individuals, y)
         end
     else
         y = heading("All queued players (" .. #players .. ")", "Oldest queue entries first", y)

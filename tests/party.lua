@@ -533,5 +533,166 @@ test("legacy solos retain exhaustive full and partial feasibility", function()
     end
 end)
 
+test("party options retain matches for every dungeon without consuming primary suggestions", function()
+    local state = ns.State.New()
+    apply(state, transaction(nil, 1, 1000, 900, { [1] = true, [2] = true, [3] = true }))
+    solo(state, "First-Realm", 4, { [1] = true })
+    solo(state, "Second-Realm", 4, { [2] = true })
+    local groups, individuals = checkGroups(state)
+    local original = signature(groups, individuals)
+    local options = ns.PartyMatchOptions(state)
+    equal(#options, 2)
+    local seen = {}
+    for _, option in ipairs(options) do
+        assert(option.dungeonOption) equal(option.partyLeader, "Leader-Realm")
+        equal(#option.members, 3) equal(count(option.dungeons), 1)
+        assert(option.dungeons[option.dungeonID])
+        equal(option.slots[1].name, "Leader-Realm") equal(option.slots[2].name, "Friend-Realm")
+        seen[option.dungeonID] = true
+    end
+    assert(seen[1] and seen[2] and not seen[3])
+    equal(signature(ns.Match(state)), original)
+end)
+
+test("one roster can be a separate option for each common dungeon", function()
+    local state = ns.State.New()
+    apply(state, transaction(nil, 1, 1000, 900, { [1] = true, [2] = true }))
+    solo(state, "Flexible-Realm", 7, { [1] = true, [2] = true })
+    local options = ns.PartyMatchOptions(state)
+    equal(#options, 2) equal(options[1].dungeonID, 1) equal(options[2].dungeonID, 2)
+    equal(names(options[1].members), names(options[2].members))
+    for _, option in ipairs(options) do
+        equal(option.slots[1].name, "Leader-Realm") equal(option.slots[2].name, "Friend-Realm")
+        assert(option.slots[3] and not option.slots[4] and not option.slots[5])
+    end
+end)
+
+test("complete party options do not suppress partial options or manufacture incompatible matches", function()
+    local state = ns.State.New()
+    apply(state, transaction(nil, 1, 1000, 900, { [1] = true, [2] = true, [3] = true }))
+    for i = 1, 3 do solo(state, "Damage" .. i .. "-Realm", 4, { [1] = true }) end
+    solo(state, "Partial-Realm", 4, { [2] = true })
+    solo(state, "ExtraTank-Realm", 1, { [3] = true })
+    local options = ns.PartyMatchOptions(state)
+    equal(#options, 2)
+    equal(options[1].dungeonID, 1) equal(#options[1].members, 5)
+    equal(options[2].dungeonID, 2) equal(#options[2].members, 3)
+end)
+
+test("party options never borrow members of another native party", function()
+    local state = ns.State.New()
+    apply(state, transaction())
+    apply(state, transaction({ member("Other-Realm", 4), member("OtherPeer-Realm", 4) }), "Other-Realm")
+    equal(#ns.PartyMatchOptions(state), 0)
+    solo(state, "Solo-Realm", 4)
+    local options = ns.PartyMatchOptions(state)
+    equal(#options, 2)
+    for _, option in ipairs(options) do
+        local own, solos = 0, 0
+        for _, player in ipairs(option.members) do
+            if player.partyLeader then equal(player.partyLeader, option.partyLeader) own = own + 1
+            else equal(player.name, "Solo-Realm") solos = solos + 1 end
+        end
+        equal(own, 2) equal(solos, 1)
+    end
+end)
+
+test("full parties and malformed party units cannot produce outside-recruit options", function()
+    local state = ns.State.New()
+    apply(state, transaction({ member("Leader-Realm", 1), member("Friend-Realm", 2),
+        member("One-Realm", 4), member("Two-Realm", 4), member("Three-Realm", 4) }))
+    solo(state, "Extra-Realm", 7)
+    equal(#ns.PartyMatchOptions(state), 0)
+    table.remove(state.records["Leader-Realm"].partyMembers)
+    equal(#ns.PartyMatchOptions(state), 0)
+    local solos = ns.State.New() solo(solos, "Solo-Realm", 7)
+    equal(#ns.PartyMatchOptions(solos), 0)
+end)
+
+test("party options are deterministic across queue insertion and fragment arrival order", function()
+    local function setup(reverse)
+        local state = ns.State.New()
+        local advertisements = {
+            { "Alpha-Realm", { member("Alpha-Realm", 1), member("PeerA-Realm", 2) } },
+            { "Bravo-Realm", { member("Bravo-Realm", 1), member("PeerB-Realm", 4) } },
+        }
+        for i = 1, 2 do
+            local ad = advertisements[reverse and 3 - i or i]
+            local packets = transaction(ad[2], 1, 1000, 900, { [1] = true, [2] = true })
+            if reverse then packets[1], packets[3] = packets[3], packets[1] end
+            apply(state, packets, ad[1])
+        end
+        for i = 1, 4 do
+            local index = reverse and 5 - i or i
+            solo(state, "Solo" .. index .. "-Realm", 6, { [1] = true, [2] = true }, 900 + index)
+        end
+        return state
+    end
+    equal(signature(ns.PartyMatchOptions(setup(false)), {}), signature(ns.PartyMatchOptions(setup(true)), {}))
+end)
+
+test("per-dungeon party options agree with an independent mandatory-party subset oracle", function()
+    math.randomseed(314159)
+    for _ = 1, 30 do
+        local state = ns.State.New()
+        for p = 1, 2 do
+            local owner = "Party" .. p .. "-Realm"
+            local first = math.random(1, 4)
+            apply(state, transaction({ member(owner, ns.SLOTS[first]),
+                member("Peer" .. p .. "-Realm", ns.SLOTS[first + 1]) }, 1, 1000,
+                800 + math.random(1, 8), { [1] = true, [2] = true, [3] = true }), owner)
+        end
+        for i = 1, 4 do
+            solo(state, "Solo" .. i .. "-Realm", math.random(1, 7),
+                { [math.random(1, 3)] = true }, 800 + math.random(1, 8))
+        end
+        local players, indexed = state:Sorted(), {}
+        for _, option in ipairs(ns.PartyMatchOptions(state)) do
+            local key = option.partyLeader .. ":" .. option.dungeonID
+            assert(not indexed[key]) indexed[key] = option
+        end
+        for p = 1, 2 do
+            local owner = "Party" .. p .. "-Realm"
+            for dungeon = 1, 3 do
+                local best, eligible = nil, {}
+                for index, player in ipairs(players) do
+                    if player.partyLeader == owner or not player.partyLeader then
+                        eligible[#eligible + 1] = { index = index, player = player }
+                    end
+                end
+                for mask = 1, 2 ^ #eligible - 1 do
+                    local subset, order, partyCount = {}, {}, 0
+                    for i, candidate in ipairs(eligible) do
+                        if math.floor(mask / 2 ^ (i - 1)) % 2 == 1 then
+                            subset[#subset + 1], order[#order + 1] = candidate.player, candidate.index
+                            if candidate.player.partyLeader then partyCount = partyCount + 1 end
+                        end
+                    end
+                    if partyCount == 2 and #subset >= 3 and #subset <= 5
+                        and maximum(subset, dungeon, 1, {}) == #subset then
+                        local better = not best or #subset > #best.members
+                        if best and #subset == #best.members then
+                            for i, position in ipairs(order) do
+                                if position ~= best.order[i] then better = position < best.order[i] break end
+                            end
+                        end
+                        if better then best = { members = subset, order = order } end
+                    end
+                end
+                local actual = indexed[owner .. ":" .. dungeon]
+                equal(actual ~= nil, best ~= nil)
+                if best then
+                    equal(#actual.members, #best.members)
+                    equal(table.concat(actual.order, ","), table.concat(best.order, ","))
+                    for slot = 1, 5 do
+                        local player = actual.slots[slot]
+                        if player then assert(ns.HasRole(player.roles, ns.SLOTS[slot])) end
+                    end
+                end
+            end
+        end
+    end
+end)
+
 print(passed .. " passed; " .. failed .. " failed")
 if failed > 0 then os.exit(1) end

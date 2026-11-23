@@ -3028,8 +3028,10 @@ end)
 local function suggestedPartyControl(c, widgets)
     for _, control in ipairs(widgets) do
         if control.guildQueueKind == "party" and control.shown and control.group then
-            for _, group in ipairs(c.ns.groups) do
-                if control.group == group then return control end
+            for _, groups in ipairs({ c.ns.groups, c.ns.matchOptions }) do
+                for _, group in ipairs(groups) do
+                    if control.group == group then return control end
+                end
             end
         end
     end

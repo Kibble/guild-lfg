@@ -45,6 +45,72 @@ local function noPartyPacketsAfter(c, index)
     end
 end
 
+local function optionFor(c, dungeonID, leader)
+    leader = leader or c.ns.playerName
+    for _, option in ipairs(c.ns.matchOptions) do
+        if option.dungeonID == dungeonID and option.partyLeader == leader then return option end
+    end
+    error("Expected dungeon option " .. dungeonID .. " for " .. leader)
+end
+
+local function dungeonOptions(options)
+    options = options or {}
+    options.saved = options.saved or { roles = 0, dungeons = { [1] = true, [2] = true } }
+    local c = party(options)
+    equal(#c.ns.matchOptions, 0)
+    queued(c)
+    c:receive("RecruitOne-TestRealm", packet(1, 4, { [1] = true }, c.now, c.now))
+    c:receive("RecruitTwo-TestRealm", packet(1, 4, { [2] = true }, c.now, c.now))
+    equal(#c.ns.matchOptions, 2)
+    return c
+end
+
+local function receiveParty(c, leader, guest, dungeons, revision)
+    local fragments = assert(c.ns.Protocol.EncodeParty(revision or 1, c.now, c.now, dungeons, {
+        { name = leader, roles = 1 }, { name = guest, roles = 2 } }))
+    for _, text in ipairs(fragments) do c:fire("CHAT_MSG_ADDON", c.ns.PREFIX, text, "GUILD", leader) end
+end
+
+local function copyQueue(sender, receiver)
+    receiver.now = sender.now
+    for name, record in pairs(sender.ns.state.records) do
+        if name ~= receiver.ns.playerName then
+            local revision = sender.ns.state.seen[name]
+            if record.partyMembers then
+                local fragments = assert(sender.ns.Protocol.EncodeParty(revision, record.sentAt,
+                    record.joinedAt, record.dungeons, record.partyMembers))
+                for _, text in ipairs(fragments) do
+                    receiver:fire("CHAT_MSG_ADDON", receiver.ns.PREFIX, text, "GUILD", name)
+                end
+            else
+                receiver:receive(name, packet(revision, record.roles, record.dungeons, record.joinedAt, record.sentAt))
+            end
+        end
+    end
+end
+
+local function claimFor(c, option, token, kind, sentAt)
+    return { kind = kind or "F", sentAt = sentAt or c.now, claimID = token,
+        replacesID = 0, matchupKey = assert(c.ns.MatchupKey(option)) }
+end
+
+local function lastClaim(c, kind)
+    for index = #c.sent, 1, -1 do
+        local decoded = c.ns.Protocol.Decode(c.sent[index].text)
+        if decoded and decoded.kind == (kind or "F") then return decoded end
+    end
+end
+
+local function optionControls(widgets)
+    local found = {}
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "party" and control.shown and control.group and control.group.dungeonOption then
+            found[control.group.dungeonID] = control
+        end
+    end
+    return found
+end
+
 test("party leader queues non-guild non-addon members using native roles and leader dungeons", function()
     local c = party({ saved = { roles = 0, dungeons = { [2] = true } }, roster = { "Self-TestRealm" } })
     local record = queued(c)
@@ -822,5 +888,414 @@ test("synchronous outsider or lost-leadership events still stop the authorized i
         -- invitations after losing native party leadership.
         equal(c.ns.queued, not outsider)
         c:advance(3) equal(#c.invites, 1)
+    end
+end)
+
+test("native-party dungeon alternatives independently invite only the clicked dungeon's recruit", function()
+    for dungeonID, recruit in ipairs({ "RecruitOne-TestRealm", "RecruitTwo-TestRealm" }) do
+        local c = dungeonOptions()
+        equal(#c.ns.groups, 1) equal(#c.ns.individuals, 1)
+        local option = optionFor(c, dungeonID)
+        assert(option.dungeonOption and option.dungeons[dungeonID])
+        equal(#option.members, 3)
+        equal(c.ns.CreatePartyDisabledReason(option), nil)
+        equal(#c.invites, 0)
+        assert(c.ns.CreateParty(option))
+        equal(#c.invites, 1) equal(c.invites[1], recruit)
+        equal(lastClaim(c).matchupKey, c.ns.MatchupKey(option))
+        c:advance(12) equal(#c.invites, 1) -- Matching and lease expiry never invite.
+    end
+end)
+
+test("role-column targets select their containing own-party alternative rather than the primary matchup", function()
+    for dungeonID, recruit in ipairs({ "RecruitOne-TestRealm", "RecruitTwo-TestRealm" }) do
+        local c = dungeonOptions()
+        local option = optionFor(c, dungeonID)
+        equal(c.ns.QueueInviteDisabledReason(recruit, 4), nil)
+        assert(c.ns.InviteQueuedPlayer(recruit, 4))
+        equal(#c.invites, 1) equal(c.invites[1], recruit)
+        equal(lastClaim(c).matchupKey, c.ns.MatchupKey(option))
+        assert(c.ns.FormationStatus(option).sameMatchup)
+    end
+end)
+
+test("alternate dungeons with identical semantic rosters alias the primary wire key and stay actionable", function()
+    for _, selected in ipairs({ 1, 2 }) do
+        local c = dungeonOptions()
+        c:receive("RecruitOne-TestRealm", packet(2, 4, { [1] = true, [2] = true }, c.now, c.now))
+        c:receive("RecruitTwo-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
+        local first, second = optionFor(c, 1), optionFor(c, 2)
+        local key = assert(c.ns.MatchupKey(c.ns.groups[1]))
+        equal(c.ns.MatchupKey(first), key) equal(c.ns.MatchupKey(second), key)
+        assert(c.ns.CreateParty(optionFor(c, selected)))
+        equal(c.invites[1], "RecruitOne-TestRealm")
+        local claim = lastClaim(c)
+        c:advance(6)
+        assert(c.ns.FormationStatus(first).sameMatchup and c.ns.FormationStatus(second).sameMatchup)
+        assert(c.ns.CreateParty(optionFor(c, 3 - selected)))
+        equal(lastClaim(c).claimID, claim.claimID) -- Alias clicks cannot renew the ten-second lease.
+        equal(#c.invites, 2)
+    end
+end)
+
+test("stale option objects cannot invite after preferences roster roles or freshness change", function()
+    for _, change in ipairs({ "recruit", "preferences", "roster", "roles", "expiry" }) do
+        local c = dungeonOptions()
+        local old = optionFor(c, 2)
+        if change == "recruit" then
+            c:receive("RecruitTwo-TestRealm", packet(2, 4, { [3] = true }, c.now, c.now))
+        elseif change == "preferences" then
+            c.ns.prefs.dungeons = { [1] = true } c.ns.PreferencesChanged()
+        elseif change == "roster" then
+            c.partyMembers = { "Different-OtherRealm" } c:fire("GROUP_ROSTER_UPDATE")
+        elseif change == "roles" then
+            c.partyRoles.party1 = "DAMAGER" c:fire("PLAYER_ROLES_ASSIGNED")
+        else
+            c.ns.state.records["RecruitTwo-TestRealm"].sentAt = c.now - c.ns.TIMEOUT
+        end
+        equal(c.ns.MatchupKey(old), nil)
+        assert(c.ns.CreatePartyDisabledReason(old), change)
+        assert(not c.ns.CreateParty(old), change)
+        equal(#c.invites, 0) equal(lastClaim(c), nil)
+    end
+end)
+
+test("unreported live native-party and preference changes are checked again before option invitations", function()
+    for _, change in ipairs({ "roster", "roles", "leader", "preferences" }) do
+        local c = dungeonOptions()
+        local option = optionFor(c, 2)
+        if change == "roster" then c.partyMembers = { "Outsider-TestRealm" }
+        elseif change == "roles" then c.partyRoles.party1 = "DAMAGER"
+        elseif change == "leader" then c.partyLeader = false
+        else c.ns.prefs.dungeons = { [1] = true } end
+        assert(not c.ns.CreateParty(option), change)
+        equal(#c.invites, 0)
+    end
+end)
+
+test("forged copies and changed selected-dungeon option objects fail closed", function()
+    local c = dungeonOptions()
+    local option, forged = optionFor(c, 2), {}
+    for key, value in pairs(option) do forged[key] = value end
+    equal(c.ns.MatchupKey(forged), nil)
+    assert(not c.ns.CreateParty(forged))
+    option.dungeonID = 1
+    equal(c.ns.MatchupKey(option), nil)
+    assert(not c.ns.CreateParty(option)) equal(#c.invites, 0)
+end)
+
+test("actual hash collisions invalidate every colliding source instead of aliasing distinct rosters", function()
+    local c = dungeonOptions()
+    c.env.string = setmetatable({ format = function(format, ...)
+        if format == "%08x%08x" then return "0000000000000000" end
+        return string.format(format, ...)
+    end }, { __index = string })
+    c:receive("Unrelated-TestRealm", packet(1, 4, { [3] = true }, c.now, c.now))
+    for _, option in ipairs(c.ns.matchOptions) do
+        equal(c.ns.MatchupKey(option), nil)
+        assert(not c.ns.CreateParty(option))
+    end
+    equal(#c.invites, 0)
+end)
+
+test("another guild client indexes and authenticates global option claims not just its own party", function()
+    local c = dungeonOptions()
+    local observer = client({ characterName = "Observer" })
+    copyQueue(c, observer)
+    equal(#observer.ns.matchOptions, 2)
+    local option = optionFor(observer, 2, c.ns.playerName)
+    local claim = claimFor(c, optionFor(c, 2), 100)
+    equal(observer.ns.MatchupKey(option), claim.matchupKey)
+    observer:receive("RecruitTwo-TestRealm", claim) -- Only the premade's leader may claim it.
+    equal(observer.ns.FormationStatus(option), nil)
+    observer:receive(c.ns.playerName, claim, "WHISPER")
+    equal(observer.ns.FormationStatus(option), nil)
+    observer:receive(c.ns.playerName, claim)
+    local status = observer.ns.FormationStatus(option)
+    equal(status.owner, c.ns.playerName) assert(status.sameMatchup and not status.isOwner)
+    assert(observer.ns.QueueInviteDisabledReason("RecruitTwo-TestRealm", 4))
+    assert(not observer.ns.InviteQueuedPlayer("RecruitTwo-TestRealm", 4))
+    observer:receive(c.ns.playerName, claimFor(observer, option, 100, "U"))
+    equal(observer.ns.FormationStatus(option), nil)
+    observer:receive(c.ns.playerName, claim)
+    equal(observer.ns.FormationStatus(option), nil) -- An authenticated release cannot be replayed away.
+    equal(#observer.invites, 0)
+end)
+
+test("an owner's active option blocks their other card and target until the original lease expires", function()
+    local c = dungeonOptions()
+    local first, second = optionFor(c, 1), optionFor(c, 2)
+    assert(c.ns.CreateParty(first))
+    local claim = lastClaim(c)
+    local status = c.ns.FormationStatus(second)
+    assert(status.isOwner and not status.sameMatchup)
+    assert(c.ns.FormationDisabledReason(second))
+    assert(c.ns.QueueInviteDisabledReason("RecruitTwo-TestRealm", 4))
+    c:advance(6) -- Native invitation cooldown alone must not unlock an alternative.
+    assert(not c.ns.CreateParty(second))
+    assert(not c.ns.InviteQueuedPlayer("RecruitTwo-TestRealm", 4))
+    equal(lastClaim(c).claimID, claim.claimID) equal(#c.invites, 1)
+    c:advance(3) assert(c.ns.FormationDisabledReason(second))
+    c:advance(1) equal(c.ns.FormationStatus(second), nil)
+    equal(c.ns.CreatePartyDisabledReason(second), nil) equal(#c.invites, 1)
+    assert(c.ns.CreateParty(second)) equal(c.invites[2], "RecruitTwo-TestRealm")
+end)
+
+test("overlapping foreign party claims lock shared cards and targets but leave unrelated alternatives usable", function()
+    local c = dungeonOptions()
+    receiveParty(c, "Bravo-TestRealm", "BravoGuest-OtherRealm", { [1] = true })
+    receiveParty(c, "Charlie-TestRealm", "CharlieGuest-OtherRealm", { [3] = true })
+    c:receive("RecruitThree-TestRealm", packet(1, 4, { [3] = true }, c.now, c.now))
+    equal(#c.ns.matchOptions, 4)
+    local claimed = optionFor(c, 1, "Bravo-TestRealm")
+    c:receive("Bravo-TestRealm", claimFor(c, claimed, 100))
+    local first, second = optionFor(c, 1), optionFor(c, 2)
+    local status = c.ns.FormationStatus(first)
+    equal(status.owner, "Bravo-TestRealm") assert(not status.sameMatchup)
+    assert(c.ns.CreatePartyDisabledReason(first))
+    assert(c.ns.QueueInviteDisabledReason("RecruitOne-TestRealm", 4))
+    equal(c.ns.FormationStatus(second), nil)
+    equal(c.ns.FormationStatus(optionFor(c, 3, "Charlie-TestRealm")), nil)
+    equal(c.ns.QueueInviteDisabledReason("RecruitTwo-TestRealm", 4), nil)
+    assert(c.ns.CreateParty(second)) equal(#c.invites, 1) equal(c.invites[1], "RecruitTwo-TestRealm")
+end)
+
+test("same-owner replacement tokens cannot switch options or let an old release unlock a later option", function()
+    local c = dungeonOptions({ characterName = "Alpha" })
+    local observer = client({ characterName = "Observer" })
+    copyQueue(c, observer)
+    local first = optionFor(observer, 1, c.ns.playerName)
+    local second = optionFor(observer, 2, c.ns.playerName)
+    local original, replacement = claimFor(observer, first, 100), claimFor(observer, second, 101)
+    observer:receive(c.ns.playerName, original)
+    observer:receive(c.ns.playerName, replacement)
+    equal(observer.ns.FormationStatus(first).key, original.matchupKey)
+    assert(not observer.ns.FormationStatus(second).sameMatchup)
+    observer:receive(c.ns.playerName, claimFor(observer, first, 100, "U"))
+    equal(observer.ns.FormationStatus(second), nil)
+    observer:receive(c.ns.playerName, replacement)
+    equal(observer.ns.FormationStatus(second), nil)
+    observer:receive(c.ns.playerName, claimFor(observer, second, 102))
+    assert(observer.ns.FormationStatus(second).sameMatchup)
+    observer:receive(c.ns.playerName, claimFor(observer, first, 100, "U"))
+    assert(observer.ns.FormationStatus(second).sameMatchup)
+    equal(#observer.invites, 0)
+end)
+
+test("failed option invitations release peer locks without automatically inviting on release or expiry", function()
+    local c = dungeonOptions()
+    local observer = client({ characterName = "Observer" })
+    copyQueue(c, observer) link(c, observer)
+    c.failInvite = "RecruitTwo-TestRealm"
+    assert(not c.ns.CreateParty(optionFor(c, 2)))
+    local other = optionFor(observer, 1, c.ns.playerName)
+    assert(observer.ns.FormationStatus(other))
+    equal(c.ns.FormationStatus(optionFor(c, 1)), nil)
+    c:advance(1)
+    equal(observer.ns.FormationStatus(other), nil)
+    c.failInvite = nil c:advance(12)
+    equal(#c.invites, 0) equal(#observer.invites, 0)
+    assert(c.ns.CreateParty(optionFor(c, 1))) equal(c.invites[1], "RecruitOne-TestRealm")
+end)
+
+test("a failed option can explicitly replace its released token on another option despite reordered releases", function()
+    for _, order in ipairs({ "startsFirst", "releaseFirst", "oldStartLast", "lostRelease" }) do
+        local c = dungeonOptions()
+        local observer = client({ characterName = "Observer" })
+        copyQueue(c, observer)
+        c.failInvite = "RecruitOne-TestRealm"
+        assert(not c.ns.CreateParty(optionFor(c, 1)))
+        local first = lastClaim(c)
+        c:advance(5) -- Respect the independent group-action cooldown.
+        observer.now = c.now
+        assert(c.ns.CreateParty(optionFor(c, 2)))
+        local second = lastClaim(c)
+        equal(second.replacesID, first.claimID)
+        assert(second.matchupKey ~= first.matchupKey)
+        c:advance(1)
+        local release = assert(lastClaim(c, "U"))
+        local packets = order == "startsFirst" and { first, second, release }
+            or order == "releaseFirst" and { first, release, second }
+            or order == "oldStartLast" and { release, second, first } or { first, second }
+        for _, decoded in ipairs(packets) do observer:receive(c.ns.playerName, decoded) end
+        local option = optionFor(observer, 2, c.ns.playerName)
+        assert(observer.ns.FormationStatus(option).sameMatchup, order)
+        equal(observer.ns.FormationStatus(option).key, second.matchupKey)
+        observer:receive(c.ns.playerName, release)
+        assert(observer.ns.FormationStatus(option).sameMatchup, order)
+        equal(#c.invites, 1) equal(c.invites[1], "RecruitTwo-TestRealm") equal(#observer.invites, 0)
+    end
+end)
+
+test("simultaneous starts across overlapping party options converge without automatic retries", function()
+    local a = dungeonOptions({ characterName = "Alpha" })
+    local b = party({ characterName = "Bravo" })
+    b.partyMembers = { "BravoGuest-OtherRealm" } queued(b)
+    copyQueue(b, a) copyQueue(a, b)
+    local left, right = optionFor(a, 1), optionFor(b, 1)
+    assert(a.ns.CreateParty(left)) assert(b.ns.CreateParty(right))
+    local pa, pb = lastClaim(a), lastClaim(b)
+    a:receive(b.ns.playerName, pb) b:receive(a.ns.playerName, pa)
+    equal(a.ns.FormationStatus(left).owner, a.ns.playerName)
+    equal(b.ns.FormationStatus(right).owner, a.ns.playerName)
+    assert(not b.ns.FormationStatus(right).sameMatchup)
+    assert(not b.ns.CreateParty(right))
+    equal(#a.invites, 1) equal(#b.invites, 1)
+    a:advance(11) b:advance(11)
+    equal(#a.invites, 1) equal(#b.invites, 1)
+end)
+
+test("synchronous competing option announcements are rechecked before the first native invite", function()
+    local c = dungeonOptions()
+    receiveParty(c, "Alpha-TestRealm", "AlphaGuest-OtherRealm", { [1] = true })
+    local own, competing = optionFor(c, 1), optionFor(c, 1, "Alpha-TestRealm")
+    local original = c.env.C_ChatInfo.SendAddonMessage
+    c.env.C_ChatInfo.SendAddonMessage = function(prefix, text, channel)
+        local result = original(prefix, text, channel)
+        local decoded = c.ns.Protocol.Decode(text)
+        if decoded and decoded.kind == "F" then c:receive("Alpha-TestRealm", claimFor(c, competing, 100)) end
+        return result
+    end
+    assert(not c.ns.CreateParty(own)) equal(#c.invites, 0)
+    equal(c.ns.FormationStatus(own).owner, "Alpha-TestRealm")
+    c:advance(11) equal(#c.invites, 0)
+end)
+
+test("the race window also rejects late overlapping options in either arrival order", function()
+    for _, reversed in ipairs({ false, true }) do
+        local source = dungeonOptions({ characterName = "Alpha" })
+        receiveParty(source, "Bravo-TestRealm", "BravoGuest-OtherRealm", { [1] = true })
+        local observer = client({ characterName = "Observer" })
+        copyQueue(source, observer)
+        local first = optionFor(observer, 1, source.ns.playerName)
+        local second = optionFor(observer, 1, "Bravo-TestRealm")
+        local start = observer.now
+        local early = claimFor(observer, first, 100, "F", start)
+        if not reversed then observer:receive(source.ns.playerName, early) end
+        observer:advance(6)
+        local late = claimFor(observer, second, 200)
+        observer:receive("Bravo-TestRealm", late)
+        if reversed then observer:receive(source.ns.playerName, early) end
+        equal(observer.ns.FormationStatus(second).owner, source.ns.playerName)
+        observer:receive(source.ns.playerName, claimFor(observer, first, 100, "U"))
+        equal(observer.ns.FormationStatus(second), nil)
+        observer:receive("Bravo-TestRealm", late)
+        equal(observer.ns.FormationStatus(second), nil) -- A rejected late contender never auto-promotes.
+        observer:advance(10) equal(#observer.invites, 0)
+    end
+end)
+
+test("synchronous option preference changes stop group and role-target invitations even when another dungeon still fits", function()
+    for _, roleTarget in ipairs({ false, true }) do
+        local c = dungeonOptions()
+        local original = c.env.C_ChatInfo.SendAddonMessage
+        c.env.C_ChatInfo.SendAddonMessage = function(prefix, text, channel)
+            local result = original(prefix, text, channel)
+            local decoded = c.ns.Protocol.Decode(text)
+            if decoded and decoded.kind == "F" then
+                c:receive("RecruitTwo-TestRealm", packet(2, 4, { [1] = true }, c.now, c.now))
+            end
+            return result
+        end
+        if roleTarget then assert(not c.ns.InviteQueuedPlayer("RecruitTwo-TestRealm", 4))
+        else assert(not c.ns.CreateParty(optionFor(c, 2))) end
+        equal(#c.invites, 0)
+        c:advance(12) equal(#c.invites, 0)
+    end
+end)
+
+test("explicit solo batches skip targets already present after a synchronous native-party update", function()
+    local c = client()
+    local group = suggestedGroup(c)
+    local targets = {}
+    for _, member in ipairs(group.members) do
+        if member.name ~= c.ns.playerName then targets[#targets + 1] = member.name end
+    end
+    local alreadyPresent = targets[2]
+    local original = c.env.C_PartyInfo.InviteUnit
+    c.env.C_PartyInfo.InviteUnit = function(name)
+        original(name)
+        if #c.invites == 1 then
+            c.homeGroup, c.partyMembers = true, { name, alreadyPresent }
+            c:fire("GROUP_ROSTER_UPDATE")
+        end
+    end
+    assert(c.ns.CreateParty(group))
+    equal(#c.invites, 3)
+    for _, name in ipairs(c.invites) do assert(name ~= alreadyPresent) end
+end)
+
+test("dungeon option cards reuse pooled widgets and remove withdrawn recruits' stale actions", function()
+    local c = dungeonOptions()
+    for id = 3, 8 do c.ns.prefs.dungeons[id] = true end
+    c.ns.PreferencesChanged() c:advance(8)
+    for id = 3, 8 do
+        c:receive("Extra" .. id .. "-TestRealm", packet(1, 4, { [id] = true }, c.now, c.now))
+    end
+    local widgets = openUI(c)
+    local buttons = optionControls(widgets)
+    for id = 1, 8 do assert(buttons[id]) end
+    local widgetCount = #widgets
+    for _ = 1, 10 do c.ns.RefreshUI() end
+    equal(#widgets, widgetCount)
+    c:receive("RecruitTwo-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
+    buttons = optionControls(widgets)
+    equal(buttons[2], nil)
+    for id, button in pairs(buttons) do
+        equal(button.group, optionFor(c, id))
+        for _, player in ipairs(button.group.members) do assert(player.name ~= "RecruitTwo-TestRealm") end
+    end
+    equal(#widgets, widgetCount) equal(#c.invites, 0)
+end)
+
+test("solo recruits keep the primary group view rather than claiming a native party's dungeon options", function()
+    local leader = dungeonOptions()
+    local recruit = client({ characterName = "RecruitTwo", saved = { roles = 4, dungeons = { [2] = true } } })
+    queued(recruit) copyQueue(leader, recruit)
+    assert(#recruit.ns.matchOptions > 0)
+    local widgets = openUI(recruit)
+    equal(next(optionControls(widgets)), nil)
+    for _, control in ipairs(widgets) do
+        assert(not (type(control.text) == "string" and control.text:find("Your dungeon match options", 1, true)))
+    end
+    equal(#recruit.invites, 0)
+end)
+
+test("non-leading native party members see dungeon alternatives without permission to recruit", function()
+    local leader = dungeonOptions()
+    leader.partyMembers = { "Member-TestRealm" }
+    leader:fire("GROUP_ROSTER_UPDATE") leader:advance(8)
+    local member = party({ characterName = "Member", partyLeader = false })
+    member.partyMembers = { leader.ns.playerName }
+    copyQueue(leader, member)
+    local widgets = openUI(member)
+    local buttons = optionControls(widgets)
+    assert(buttons[1] and buttons[2])
+    for _, button in pairs(buttons) do
+        assert(not button.enabled)
+        button.scripts.OnClick(button)
+    end
+    equal(#member.invites, 0) equal(#leader.invites, 0)
+end)
+
+test("party UI renders independent own dungeon-option click targets without exposing other parties' actions", function()
+    for _, selected in ipairs({ 1, 2 }) do
+        local c = dungeonOptions()
+        receiveParty(c, "Other-TestRealm", "OtherGuest-OtherRealm", { [1] = true })
+        local widgets = openUI(c)
+        local buttons = optionControls(widgets)
+        assert(buttons[1] and buttons[2] and buttons[1] ~= buttons[2])
+        for dungeonID, control in pairs(buttons) do
+            equal(control.group, optionFor(c, dungeonID))
+            assert(control.enabled) equal(control.text, "Invite Others")
+            equal(control.group.partyLeader, c.ns.playerName)
+        end
+        equal(#c.invites, 0)
+        buttons[selected].scripts.OnClick(buttons[selected])
+        equal(#c.invites, 1)
+        equal(c.invites[1], selected == 1 and "RecruitOne-TestRealm" or "RecruitTwo-TestRealm")
+        assert(not buttons[3 - selected].enabled)
+        buttons[3 - selected].scripts.OnClick(buttons[3 - selected]) -- Also guard a direct stale callback.
+        equal(#c.invites, 1)
     end
 end)

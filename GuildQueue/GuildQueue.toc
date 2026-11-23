@@ -2,7 +2,7 @@
 ## Title: Guild Queue
 ## Notes: Guild-hosted solo and whole-party dungeon queue. Party invitations only on click.
 ## Author: Guild Queue contributors
-## Version: 0.18.0
+## Version: 0.19.0
 ## SavedVariablesPerCharacter: GuildQueueDB
 
 Config.lua

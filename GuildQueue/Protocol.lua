@@ -61,9 +61,43 @@ function Protocol.DecodeDungeons(text)
     return selected, count
 end
 
--- Queue state never carries a sender identity: the game-provided sender owns
--- it. Optional role notices carry only their intended recipient, not peer state.
+local function numberInRange(value, minimum, maximum)
+    return type(value) == "number" and value >= minimum and value <= maximum and value % 1 == 0
+end
+
+local function memberName(name)
+    return type(name) == "string" and #name <= 128 and not name:find("[%c%s|]")
+        and name:match("^[^%-]+%-.+$") ~= nil
+end
+
+local function partyHeader(packet)
+    return numberInRange(packet.revision, 1, 9007199254740990)
+        and numberInRange(packet.sentAt, 1, 9999999999)
+        and numberInRange(packet.total, 2, 5)
+end
+
+-- The authenticated sender owns queue state, including delegated party members.
 function Protocol.Encode(packet)
+    if type(packet) ~= "table" then return nil end
+    if packet.kind == "B" or packet.kind == "C" then
+        if not partyHeader(packet) then return nil end
+        local parts = { "1", packet.kind, string.format("%.0f", packet.revision),
+            string.format("%.0f", packet.sentAt) }
+        if packet.kind == "B" then
+            if not numberInRange(packet.joinedAt, 1, packet.sentAt)
+                or not Protocol.ValidSelections(1, packet.dungeons) then return nil end
+            parts[5], parts[6], parts[7] = string.format("%.0f", packet.joinedAt),
+                tostring(packet.total), Protocol.DungeonList(packet.dungeons)
+        else
+            if not numberInRange(packet.index, 1, packet.total) or not memberName(packet.name)
+                or (packet.roles ~= 1 and packet.roles ~= 2 and packet.roles ~= 4) then return nil end
+            parts[5], parts[6], parts[7], parts[8] = tostring(packet.index), tostring(packet.total),
+                tostring(packet.roles), packet.name
+        end
+        local message = table.concat(parts, "|")
+        if #message <= 255 then return message end
+        return nil
+    end
     if packet.kind == "H" or packet.kind == "P" then
         return "1|" .. packet.kind
     end
@@ -130,6 +164,23 @@ function Protocol.Decode(message)
             or not target:match("^[^%-]+%-.+$") then return nil end
         return { kind = "R", sentAt = sentAt, role = role, target = target }
     end
+    if kind == "B" or kind == "C" then
+        local packet = { kind = kind, revision = integer(fields[3], 1, 9007199254740990),
+            sentAt = integer(fields[4], 1, 9999999999), total = integer(fields[6], 2, 5) }
+        if not packet.revision or not packet.sentAt or not packet.total then return nil end
+        if kind == "B" then
+            packet.joinedAt = integer(fields[5], 1, packet.sentAt)
+            packet.dungeons = Protocol.DecodeDungeons(fields[7])
+            if #fields ~= 7 or not packet.joinedAt or not packet.dungeons then return nil end
+        else
+            packet.index = integer(fields[5], 1, packet.total)
+            packet.roles = integer(fields[7], 1, 4)
+            packet.name = fields[8]
+            if #fields ~= 8 or not packet.index or not memberName(packet.name)
+                or (packet.roles ~= 1 and packet.roles ~= 2 and packet.roles ~= 4) then return nil end
+        end
+        return packet
+    end
     if not ((kind == "X" and #fields == 4) or (kind == "S" and #fields == 7)) then
         return nil
     end
@@ -148,6 +199,32 @@ function Protocol.Decode(message)
         end
     end
     return packet
+end
+
+-- A dense, bounded transaction; leader membership and native role capacity are
+-- checked by State, which knows the authenticated owner.
+function Protocol.EncodeParty(revision, sentAt, joinedAt, dungeons, members)
+    if type(members) ~= "table" then return nil end
+    local total = 0
+    for index in pairs(members) do
+        if not numberInRange(index, 1, 5) then return nil end
+        total = total + 1
+    end
+    if total < 2 or total > 5 or #members ~= total then return nil end
+    local header = Protocol.Encode({ kind = "B", revision = revision, sentAt = sentAt,
+        joinedAt = joinedAt, total = total, dungeons = dungeons })
+    if not header then return nil end
+    local messages, names = { header }, {}
+    for index = 1, total do
+        local member = members[index]
+        if type(member) ~= "table" or not memberName(member.name) or names[member.name:lower()] then return nil end
+        local message = Protocol.Encode({ kind = "C", revision = revision, sentAt = sentAt,
+            index = index, total = total, name = member.name, roles = member.roles })
+        if not message then return nil end
+        names[member.name:lower()] = true
+        messages[#messages + 1] = message
+    end
+    return messages
 end
 
 function Protocol.ValidSelections(roles, dungeons)

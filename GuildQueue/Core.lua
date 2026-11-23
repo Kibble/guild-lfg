@@ -11,6 +11,10 @@ local lastMemberInviteAt = {}
 local pendingRoleNotices, receivedRoleNotices = {}, {}
 local availableRoles
 local send, updateGuild, nextRevision, refreshFormationIndexes
+local actualPartyMembers, nativeQueueSnapshot, reconcileQueued
+local queueMode, queueRosterIdentity, queueSelectionSignature
+local stateBatch, partyNeedsClear = nil, false
+local soloInvitationBatch
 local queueRecordNames, matchupByGroup, matchupByKey, matchupByPlayer = {}, {}, {}, {}
 local formationClaims, formationByOwner, formationWatermarks, pendingFormationReleases = {}, {}, {}, {}
 local formationWatermarkCount, lastFormationFailure = 0, -100
@@ -60,11 +64,22 @@ local function normalize(name)
     return character .. "-" .. realm
 end
 
--- Optional APIs must not gate the dungeon queue or expose secret values.
+-- Guard API failures and secret values; required native party data fails closed.
 local function safeCall(fn, ...)
     if type(fn) ~= "function" then return nil end
     local ok, value = pcall(fn, ...)
     if ok and not secret(value) then return value end
+end
+
+local function unitName(unit)
+    if type(UnitFullName) ~= "function" then return nil end
+    local ok, name, realm = pcall(UnitFullName, unit)
+    if not ok or secret(name, realm) or type(name) ~= "string"
+        or (realm ~= nil and type(realm) ~= "string") then return nil end
+    name = name:match("^%s*(.-)%s*$")
+    if realm and realm ~= "" and not name:find("[%s%-]") then name = name .. "-" .. realm end
+    name = normalize(name)
+    if name and #name <= 128 and not name:find("[%c%s|]") then return name end
 end
 
 local function boundedNumber(value, minimum, maximum)
@@ -85,7 +100,34 @@ function ns.AllowedRoles()
     return availableRoles
 end
 
+local function assignedRole(unit)
+    local role = safeCall(UnitGroupRolesAssigned, unit)
+    if role == "TANK" then return 1 end
+    if role == "HEALER" then return 2 end
+    if role == "DAMAGER" then return 4 end
+    return 0
+end
+
+local function nativeGrouped()
+    local home = safeCall(IsInGroup, LE_PARTY_CATEGORY_HOME)
+    local instance = safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE)
+    return home == true or instance == true
+end
+
+function ns.QueueButtonText()
+    if ns.queued then return queueMode == "party" and "Leave party queue" or "Leave queue" end
+    return nativeGrouped() and "Queue party" or "Join queue"
+end
+
+function ns.QueueRoles()
+    if nativeGrouped() then return assignedRole("player") end
+    return ns.prefs and ns.prefs.roles or 0
+end
+
 function ns.RoleDisabledReason(role)
+    if nativeGrouped() then
+        return "Party roles come from WoW's party controls. Assign roles there, including the leader's role."
+    end
     local allowed = ns.AllowedRoles()
     if not allowed then return "Waiting for your class role information." end
     if not ns.HasRole(allowed, role) then
@@ -257,26 +299,34 @@ function ns.StatusText()
     elseif transportError then
         return transportError
     end
-    return "Guild members with this addon only. Select roles and dungeons, then join."
+    return "Party leaders in this guild can queue their whole party. Solo players select roles and dungeons, then join."
 end
 
 function ns.JoinQueueDisabledReason()
-    if not ns.IsReady() then
-        return ns.StatusText()
-    end
-    local allowed = ns.AllowedRoles()
-    if not allowed then return "Waiting for your class role information." end
-    if ns.FilterRoles(ns.prefs.roles, allowed) ~= ns.prefs.roles then
-        return "Select only roles available for your class."
-    end
-    if not ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
-        return "Select at least one role and one dungeon."
-    end
+    if not ns.IsReady() then return ns.StatusText() end
+    local _, reason = nativeQueueSnapshot()
+    return reason
 end
 
 local function ownSelectionsMatch(record)
-    if not record or not ns.prefs or record.roles ~= ns.prefs.roles
-        or type(record.dungeons) ~= "table" or type(ns.prefs.dungeons) ~= "table" then return false end
+    local snapshot = nativeQueueSnapshot()
+    if not record or not snapshot or snapshot.mode ~= queueMode or snapshot.identity ~= queueRosterIdentity
+        or not ns.prefs or type(record.dungeons) ~= "table"
+        or type(ns.prefs.dungeons) ~= "table" then return false end
+    if snapshot.mode == "party" then
+        if type(record.partyMembers) ~= "table" or record.partyLeader ~= ns.playerName
+            or record.partySize ~= #snapshot.players or record.roles ~= snapshot.ownRole
+            or #record.partyMembers ~= #snapshot.players then return false end
+        local roles = {}
+        for _, member in ipairs(snapshot.players) do roles[member.name:lower()] = member.roles end
+        for _, member in ipairs(record.partyMembers) do
+            if type(member.name) ~= "string" or roles[member.name:lower()] ~= member.roles then return false end
+            roles[member.name:lower()] = nil
+        end
+        if next(roles) then return false end
+    elseif record.partyMembers or record.roles ~= ns.prefs.roles then
+        return false
+    end
     for id, selected in pairs(record.dungeons) do
         if selected and not ns.prefs.dungeons[id] then return false end
     end
@@ -300,7 +350,7 @@ local function freshQueueRecord(name, now)
     -- Keep canonical record names rather than references: an ordinary heartbeat
     -- replaces a record without rebuilding unchanged matcher suggestions.
     local recordName = queueRecordNames[name:lower()]
-    local record = recordName and ns.state.records[recordName]
+    local record = recordName and ns.state:Get(recordName)
     if not queueRecordFresh(record, now) or record.name:lower() ~= name:lower() then return nil end
     return record
 end
@@ -329,6 +379,11 @@ local function matchupFingerprint(group, now)
         parts[#parts + 1] = tostring(#member.name) .. ":" .. member.name
         parts[#parts + 1] = string.format("%.0f", record.joinedAt)
         parts[#parts + 1] = tostring(record.roles)
+        -- Preserve the legacy all-solo key, but bind premades to their owner.
+        if record.partyLeader then
+            parts[#parts + 1] = record.partyLeader:lower()
+            parts[#parts + 1] = tostring(record.partySize)
+        end
         parts[#parts + 1] = table.concat(ids, ",")
     end
     local text, first, second = table.concat(parts, "|"), 0, 0
@@ -362,6 +417,7 @@ local function formationWinner(entry, now)
     local winner
     for _, claim in pairs(formationClaims[entry.key] or {}) do
         if claim.deadline > now and not claim.released and entry.members[claim.owner:lower()]
+            and (not entry.partyLeader or entry.partyLeader:lower() == claim.owner:lower())
             and (not winner or claim.sentAt < winner.sentAt
                 or (claim.sentAt == winner.sentAt and (claim.owner:lower() < winner.owner:lower()
                     or (claim.owner:lower() == winner.owner:lower() and claim.claimID < winner.claimID)))) then
@@ -383,6 +439,11 @@ function ns.FormationStatus(subject)
 end
 
 function ns.FormationDisabledReason(subject)
+    local entry = currentMatchup(subject, GetServerTime())
+    if entry and entry.partyLeader and ns.playerName and entry.members[ns.playerName:lower()]
+        and entry.partyLeader:lower() ~= ns.playerName:lower() then
+        return "Only the queued party's leader can invite this matchup."
+    end
     local status = ns.FormationStatus(subject)
     if status and not status.isOwner then
         return ns.SafeText(status.owner) .. " is inviting this matchup (" .. status.remaining .. "s remaining).", status
@@ -425,7 +486,8 @@ end
 
 refreshFormationIndexes = function()
     queueRecordNames, matchupByGroup, matchupByKey, matchupByPlayer = {}, {}, {}, {}
-    for name in pairs(ns.state.records) do
+    for _, record in ipairs(ns.state:Sorted()) do
+        local name = record.name
         local lower = name:lower()
         if queueRecordNames[lower] ~= nil then queueRecordNames[lower] = false
         else queueRecordNames[lower] = name end
@@ -435,6 +497,10 @@ refreshFormationIndexes = function()
         local key, members = matchupFingerprint(group, now)
         if key then
             local entry = { group = group, key = key, members = members }
+            for name in pairs(members) do
+                local record = freshQueueRecord(name, now)
+                if record and record.partyLeader then entry.partyLeader = record.partyLeader end
+            end
             matchupByGroup[group] = entry
             if matchupByKey[key] ~= nil then matchupByKey[key] = false
             else matchupByKey[key] = entry end
@@ -465,7 +531,8 @@ end
 local function applyFormation(owner, packet, now)
     if packet.sentAt > now + 5 or now - packet.sentAt >= ns.FORMATION_TIMEOUT then return nil end
     local entry = matchupByKey[packet.matchupKey]
-    if not entry or not currentMatchup(entry.group, now) or not entry.members[owner:lower()] then return nil end
+    if not entry or not currentMatchup(entry.group, now) or not entry.members[owner:lower()]
+        or (entry.partyLeader and entry.partyLeader:lower() ~= owner:lower()) then return nil end
     local lower = owner:lower()
     local previous = formationWatermarks[lower]
     local active = formationByOwner[lower]
@@ -518,6 +585,10 @@ local function actionMatchup(subject)
 end
 
 local function formationActionDisabledReason(subject)
+    local own = ns.playerName and currentMatchup(ns.playerName, GetServerTime())
+    if own and own.partyLeader and own.partyLeader:lower() ~= ns.playerName:lower() then
+        return "Only the queued party's leader can invite this matchup."
+    end
     local reason, status = ns.FormationDisabledReason(subject)
     if reason then return reason end
     if not actionMatchup(subject) or (status and status.isOwner) then return nil end
@@ -562,7 +633,7 @@ end
 
 -- Dungeon recruitment needs a normal home party. Quests can additionally
 -- inspect a home raid without imposing dungeon or queued-preference rules.
-local function actualPartyMembers(allowRaid)
+actualPartyMembers = function(allowRaid, allowEmptyParty)
     local homeGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_HOME)
     local instanceGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE)
     if type(homeGroup) ~= "boolean" or type(instanceGroup) ~= "boolean" then
@@ -570,37 +641,42 @@ local function actualPartyMembers(allowRaid)
     end
     if instanceGroup then return nil, "You cannot send these party invitations from an instance group." end
     local self = normalize(ns.playerName)
-    if not self then return nil, "Your party identity is unavailable right now." end
-    local snapshot = { homeGroup = homeGroup, present = { [self:lower()] = true }, members = {} }
-    if not homeGroup then return snapshot end
+    if not self or #self > 128 or self:find("[%c%s|]") then
+        return nil, "Your party identity is unavailable right now."
+    end
+    local snapshot = { homeGroup = homeGroup, present = { [self:lower()] = true }, members = {},
+        units = { [self:lower()] = "player" } }
     local raid = safeCall(IsInRaid, LE_PARTY_CATEGORY_HOME)
+    if raid and not allowRaid then return nil, "A raid cannot queue or recruit for a dungeon party." end
+    if not homeGroup then return snapshot end
     if type(raid) ~= "boolean" then return nil, "Your party status is unavailable right now." end
-    if raid and not allowRaid then return nil, "You cannot send these party invitations from a raid." end
+    local currentSelf = unitName("player")
+    if not currentSelf or currentSelf:lower() ~= self:lower() then
+        return nil, "Your party identity is unavailable right now."
+    end
     local counter = GetNumSubgroupMembers
     if raid then counter = GetNumGroupMembers end
     local count = safeCall(counter, LE_PARTY_CATEGORY_HOME)
-    if not boundedNumber(count, 1, raid and 40 or 4) or type(UnitFullName) ~= "function" then
+    -- Only an explicit solo invitation batch may see its new party before
+    -- the first member resolves. All ordinary queue/roster checks stay strict.
+    local minimum = not raid and allowEmptyParty
+        and safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) == true and 0 or 1
+    if not boundedNumber(count, minimum, raid and 40 or 4) or type(UnitFullName) ~= "function" then
         return nil, "Your party roster is unavailable right now. Wait for it to update."
     end
     local seenSelf = false
     for index = 1, count do
-        local ok, name, realm = pcall(UnitFullName, (raid and "raid" or "party") .. index)
-        if not ok or secret(name, realm) or type(name) ~= "string"
-            or (realm ~= nil and type(realm) ~= "string") then
-            return nil, "Your party roster is unavailable right now. Wait for it to update."
-        end
-        -- Keep the queue's realm-qualified convention, including APIs that
-        -- already provide a qualified first return value.
-        name = name:match("^%s*(.-)%s*$")
-        if realm and realm ~= "" and not name:find("[%s%-]") then name = name .. "-" .. realm end
-        local target = normalize(name)
+        local unit = (raid and "raid" or "party") .. index
+        -- Includes realm-qualified APIs and rejects unavailable/secret names.
+        local target = unitName(unit)
         if raid and target and target:lower() == self:lower() and not seenSelf then
             seenSelf = true
         else
-            if not target or snapshot.present[target:lower()] then
+            if not target or #target > 128 or target:find("[%c%s|]") or snapshot.present[target:lower()] then
                 return nil, "Your party roster is unavailable right now. Wait for it to update."
             end
             snapshot.present[target:lower()] = true
+            snapshot.units[target:lower()] = unit
             snapshot.members[#snapshot.members + 1] = target
         end
     end
@@ -608,22 +684,81 @@ local function actualPartyMembers(allowRaid)
     return snapshot
 end
 
-local function partyQueuePreferences(snapshot, now)
-    if not ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
-        return nil, nil, "Select valid roles and dungeons for your party."
-    end
-    local players = { { name = ns.playerName, roles = ns.prefs.roles } }
-    local shared = ns.CommonDungeons(ns.prefs.dungeons, ns.prefs.dungeons)
-    for _, name in ipairs(snapshot.members) do
-        local record = freshQueueRecord(name, now)
-        if not record then
-            return nil, nil, "Every party member needs fresh queued roles and dungeon preferences."
+nativeQueueSnapshot = function(snapshot)
+    local reason
+    if not snapshot then snapshot, reason = actualPartyMembers() end
+    if not snapshot then return nil, reason end
+    snapshot.mode = snapshot.homeGroup and "party" or "solo"
+    if not snapshot.homeGroup then
+        local allowed = ns.AllowedRoles()
+        if not allowed then return nil, "Waiting for your class role information." end
+        if ns.FilterRoles(ns.prefs.roles, allowed) ~= ns.prefs.roles then
+            return nil, "Select only roles available for your class."
         end
-        players[#players + 1] = record
-        shared = ns.CommonDungeons(shared, record.dungeons)
+        if not ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
+            return nil, "Select at least one role and one dungeon."
+        end
+        snapshot.identity = ns.playerName:lower()
+        snapshot.selection = snapshot.identity .. ":" .. ns.prefs.roles .. "|"
+            .. ns.Protocol.DungeonList(ns.prefs.dungeons)
+        return snapshot
     end
-    if not next(shared) then return nil, nil, "Your party does not share a selected dungeon." end
-    return players, shared
+    local leader = safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME)
+    if type(leader) ~= "boolean" then return nil, "Your party leadership information is unavailable right now." end
+    if not leader then return nil, "Only the native party leader can queue the whole party." end
+    local players = { { name = ns.playerName } }
+    for _, name in ipairs(snapshot.members) do players[#players + 1] = { name = name } end
+    table.sort(players, function(a, b) return a.name:lower() < b.name:lower() end)
+    local names, selections = {}, {}
+    for _, player in ipairs(players) do
+        local key = player.name:lower()
+        local unit = snapshot.units[key]
+        if type(UnitIsConnected) == "function" and safeCall(UnitIsConnected, unit) ~= true then
+            return nil, "Every party member must be online, with available connection information."
+        end
+        player.roles = assignedRole(unit)
+        if player.roles == 0 then
+            return nil, "Assign a Tank, Healer or Damage role in WoW's party controls to everyone, including the leader."
+        end
+        names[#names + 1] = key
+        selections[#selections + 1] = key .. ":" .. player.roles
+        if key == ns.playerName:lower() then snapshot.ownRole = player.roles end
+    end
+    if not ns.CanFitRoleSlots(players) then
+        return nil, "Party roles must fit one Tank, one Healer and three Damage slots."
+    end
+    if not ns.Protocol.ValidSelections(snapshot.ownRole, ns.prefs.dungeons) then
+        return nil, "Select at least one valid dungeon for your party."
+    end
+    snapshot.players, snapshot.identity = players, table.concat(names, ",")
+    snapshot.selection = table.concat(selections, ",") .. "|" .. ns.Protocol.DungeonList(ns.prefs.dungeons)
+    return snapshot
+end
+
+local function partyQueuePreferences(snapshot, now)
+    if queueMode ~= "party" then
+        if not ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
+            return nil, nil, "Select valid roles and dungeons for your party."
+        end
+        local players = { { name = ns.playerName, roles = ns.prefs.roles } }
+        local shared = ns.CommonDungeons(ns.prefs.dungeons, ns.prefs.dungeons)
+        for _, name in ipairs(snapshot.members) do
+            local record = freshQueueRecord(name, now)
+            if not record then
+                return nil, nil, "Every party member needs fresh queued roles and dungeon preferences."
+            end
+            players[#players + 1] = record
+            shared = ns.CommonDungeons(shared, record.dungeons)
+        end
+        if not next(shared) then return nil, nil, "Your party does not share a selected dungeon." end
+        return players, shared
+    end
+    local current, reason = nativeQueueSnapshot(snapshot)
+    if not current then return nil, nil, reason end
+    if ns.queued and ns.QueueUpdatePending() then
+        return nil, nil, "Your party queue has changed. Wait for its latest complete queue update."
+    end
+    return current.players, ns.CommonDungeons(ns.prefs.dungeons, ns.prefs.dungeons)
 end
 
 local function partyCanFitCandidate(players, candidate, role)
@@ -659,6 +794,9 @@ function ns.CreatePartyDisabledReason(group)
         local record = name and freshQueueRecord(name, now)
         if not record or names[name:lower()] then
             return "This suggested group is no longer available. Wait for the queue to refresh."
+        end
+        if record.partyLeader and record.partyLeader:lower() ~= ns.playerName:lower() then
+            return "Only the queued party's leader can invite this matchup."
         end
         names[name:lower()], records[name:lower()] = true, record
         includesPlayer = includesPlayer or name:lower() == ns.playerName:lower()
@@ -738,6 +876,7 @@ end
 -- Snapshot once: a party may appear after the first request in this batch.
 function ns.CreateParty(group)
     updateGuild()
+    if ns.queued then reconcileQueued() end
     local reason, targets = ns.CreatePartyDisabledReason(group)
     if reason then
         printMessage(reason)
@@ -755,15 +894,49 @@ function ns.CreateParty(group)
         ns.RefreshUI()
         return false
     end
+    local soloSelection = queueMode == "solo" and queueSelectionSignature
+    local formedParty = false
+    local authorized = {}
+    for _, member in ipairs(group.members) do authorized[member.name:lower()] = true end
+    if soloSelection then
+        soloInvitationBatch = { selection = soloSelection, authorized = authorized, guildKey = ns.guildKey }
+    end
     lastPartyInviteAt = GetTime()
     local requested = 0
-    for _, name in ipairs(targets) do
+    for index, name in ipairs(targets) do
+        updateGuild()
         if ns.FormationDisabledReason(group) or ns.MatchupKey(group) ~= claim.key
-            or not ns.IsReady() or not ns.queued or ns.QueueUpdatePending() then break end
+            or claim.guildKey ~= ns.guildKey or not ns.IsReady() or not ns.queued
+            or InCombatLockdown() or not C_PartyInfo or type(C_PartyInfo.InviteUnit) ~= "function" then break end
+        local snapshot = actualPartyMembers(false, soloSelection and index > 1)
+        if not snapshot then break end
+        local valid = true
+        for _, member in ipairs(snapshot.members) do
+            if not authorized[member:lower()] then valid = false break end
+        end
+        if not valid then break end
+        if soloSelection then
+            if (index == 1 and snapshot.homeGroup) or (formedParty and not snapshot.homeGroup) then break end
+            formedParty = snapshot.homeGroup
+            -- Recheck this click's SOLO preferences, not the newly formed
+            -- party's assigned roles. This exception never enrolls that party.
+            local current = nativeQueueSnapshot({ homeGroup = false })
+            if queueMode ~= "solo" or queueSelectionSignature ~= soloSelection
+                or not current or current.selection ~= soloSelection then break end
+        elseif ns.QueueUpdatePending() then
+            break
+        end
+        if snapshot.homeGroup and (safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) ~= true
+            or safeCall(C_PartyInfo.CanInvite) ~= true
+            or safeCall(C_PartyInfo.IsPartyFull, LE_PARTY_CATEGORY_HOME) ~= false) then break end
         lastMemberInviteAt[name:lower()] = GetTime()
         local ok, result = pcall(C_PartyInfo.InviteUnit, name)
         if ok and result ~= false then requested = requested + 1 end
     end
+    -- A synchronous roster event may occur inside InviteUnit. Only this
+    -- already-authorized transition waits until the explicit batch finishes.
+    soloInvitationBatch = nil
+    if ns.queued then reconcileQueued() end
     if isNew and requested == 0 then releaseFormation(claim) end
     if requested == #targets then
         printMessage("Party invitations requested. Players must accept; leave the queue when finished forming your party.")
@@ -776,13 +949,19 @@ end
 
 function ns.SetQueued(wanted)
     if wanted then
-        local reason = ns.JoinQueueDisabledReason()
+        if ns.queued then reconcileQueued() end
+        local reason = not ns.IsReady() and ns.StatusText() or nil
+        local snapshot
+        if not reason then snapshot, reason = nativeQueueSnapshot() end
         if reason then
             printMessage(reason)
             return
         end
         if not ns.queued then
             ns.joinedAt = GetServerTime()
+            queueMode, queueRosterIdentity = snapshot.mode, snapshot.identity
+            queueSelectionSignature = snapshot.selection
+            stateBatch, partyNeedsClear = nil, snapshot.mode == "party"
         end
         ns.queued = true
         printMessage("Queue requested. Use Create party or Invite Others on your suggested group to invite its missing members.")
@@ -790,8 +969,11 @@ function ns.SetQueued(wanted)
         local claim = ns.playerName and formationByOwner[ns.playerName:lower()]
         releaseFormation(claim)
         ns.queued, ns.joinedAt = false, nil
-        -- Withdraw locally immediately, even if transport is currently blocked.
-        ns.state.records[ns.playerName or ""] = nil
+        queueMode, queueRosterIdentity, queueSelectionSignature = nil, nil, nil
+        stateBatch, partyNeedsClear, pendingRoleNotices = nil, false, {}
+        soloInvitationBatch = nil
+        -- Remove both the owner and unfinished fragments without losing replay protection.
+        if ns.playerName then ns.state:Remove(ns.playerName) end
         rebuild()
         printMessage("Left the queue. Other clients update on delivery or within 75 seconds.")
     end
@@ -799,20 +981,54 @@ function ns.SetQueued(wanted)
     ns.RefreshUI()
 end
 
+reconcileQueued = function()
+    if not ns.queued then return nil end
+    if soloInvitationBatch and queueMode == "solo" and ns.IsReady()
+        and soloInvitationBatch.guildKey == ns.guildKey then
+        local forming = actualPartyMembers(false, true)
+        local current = nativeQueueSnapshot({ homeGroup = false })
+        local valid = forming and forming.homeGroup and current
+            and current.selection == soloInvitationBatch.selection
+            and queueSelectionSignature == soloInvitationBatch.selection
+            and safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) == true
+        if valid then
+            for _, name in ipairs(forming.members) do
+                if not soloInvitationBatch.authorized[name:lower()] then valid = false break end
+            end
+            if valid then return current end
+        end
+    end
+    local roster = actualPartyMembers()
+    local mode = roster and (roster.homeGroup and "party" or "solo")
+    if not roster or mode ~= queueMode then
+        ns.SetQueued(false)
+        return nil
+    end
+    local snapshot = nativeQueueSnapshot(roster)
+    if not snapshot then
+        -- Unknown class capabilities suspend solo updates, as before. Native
+        -- party identities, leadership and assigned roles must always be known.
+        if mode == "solo" and not ns.AllowedRoles() then return nil end
+        ns.SetQueued(false)
+        return nil
+    end
+    if snapshot.identity ~= queueRosterIdentity then
+        ns.SetQueued(false)
+        return nil
+    end
+    if snapshot.selection ~= queueSelectionSignature then
+        queueSelectionSignature, stateBatch = snapshot.selection, nil
+        ns.state:Remove(ns.playerName)
+        rebuild()
+        requestState(0)
+    end
+    return snapshot
+end
+
 function ns.PreferencesChanged()
     restrictRoles()
     if ns.queued then
-        if ns.AllowedRoles() and ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then
-            if ns.QueueUpdatePending() then
-                -- Keep queue age and the sticky scheduled retry, but never use
-                -- an obsolete local advertisement to authorize invitations.
-                ns.state.records[ns.playerName or ""] = nil
-                rebuild()
-            end
-            requestState(0)
-        else
-            ns.SetQueued(false)
-        end
+        if reconcileQueued() then requestState(0) end
     end
     ns.RefreshUI()
 end
@@ -840,6 +1056,8 @@ local function applyGuildIdentity(guildName, guildRealm)
     if key ~= ns.guildKey then
         ns.guildKey, ns.guildName = key, guildName
         ns.queued, ns.joinedAt = false, nil
+        queueMode, queueRosterIdentity, queueSelectionSignature = nil, nil, nil
+        stateBatch, partyNeedsClear = nil, false
         ns.state = ns.State.New()
         pendingStateAt, pendingHello, pendingPresence = nil, key ~= nil, key ~= nil
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
@@ -978,6 +1196,9 @@ function ns.QueueInviteDisabledReason(name, requestedRole)
     if not player then
         return "This player needs fresh queued roles and dungeon preferences. Wait for the queue to refresh.", target
     end
+    if player.partyLeader then
+        return "This player belongs to a queued party. Only its leader can recruit solo players; party members cannot be invited individually.", player.name
+    end
     if requestedRole and not ns.HasRole(player.roles, requestedRole) then
         return "This player no longer offers the selected role.", player.name
     end
@@ -1038,6 +1259,7 @@ end
 -- Role-list invitations have no same-zone or complete-group requirement.
 function ns.InviteQueuedPlayer(name, requestedRole)
     updateGuild()
+    if ns.queued then reconcileQueued() end
     local reason, target = ns.QueueInviteDisabledReason(name, requestedRole)
     if reason then
         printMessage(reason)
@@ -1050,6 +1272,7 @@ end
 -- Only the explicit Invite click calls this. Never retry from timers or messages.
 function ns.InviteQuestingPlayer(name)
     updateGuild()
+    if ns.queued then reconcileQueued() end
     if localDirty then scanLocalQuests() end
     scanGuildMembers()
     local reason, target = ns.QuestInviteDisabledReason(name)
@@ -1062,13 +1285,19 @@ function ns.InviteQuestingPlayer(name)
 end
 
 send = function(message)
+    if ns.queued then
+        local signature = queueSelectionSignature
+        if not reconcileQueued() or signature ~= queueSelectionSignature then return false end
+    end
+    if not ns.IsReady() or type(message) ~= "string" then return false end
     if safeCall(C_ChatInfo and C_ChatInfo.InChatMessagingLockdown) == true then
         transportError = "Addon messaging is restricted right now; retrying when allowed."
         return false
     end
-    local ok, result = pcall(C_ChatInfo.SendAddonMessage, ns.PREFIX, message, "GUILD")
+    local sender = C_ChatInfo and C_ChatInfo.SendAddonMessage
+    local ok, result = pcall(sender, ns.PREFIX, message, "GUILD")
     local success = Enum and Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success or 0
-    if not ok or result ~= success then
+    if not ok or secret(result) or result ~= success then
         -- Do not print raw API error strings or payloads.
         transportError = "Guild message could not be sent (account/server restriction or throttling); retrying."
         return false
@@ -1078,28 +1307,63 @@ send = function(message)
 end
 
 local function sendState()
-    if ns.queued then
-        if not ns.AllowedRoles() then return false end
-        if restrictRoles() then ns.PreferencesChanged() end
-        if ns.queued and not ns.Protocol.ValidSelections(ns.prefs.roles, ns.prefs.dungeons) then ns.SetQueued(false) end
-    end
+    -- Never publish a solo advertisement during a forming-party callback.
+    if soloInvitationBatch then return false end
+    if restrictRoles() then ns.PreferencesChanged() end
+    local snapshot = ns.queued and reconcileQueued()
+    if ns.queued and not snapshot then return false end
+    if not ns.IsReady() then return false end
     local now = GetServerTime()
-    -- Persist only preferences and an ordering counter, never active queue membership.
-    -- Server-time seeding also helps when the character logs in on another computer.
-    ns.prefs.revision = math.max(ns.prefs.revision, now * 1000) + 1
-    local packet = { kind = ns.queued and "S" or "X", revision = ns.prefs.revision, sentAt = now }
-    if ns.queued then
-        packet.joinedAt, packet.roles, packet.dungeons = ns.joinedAt, ns.prefs.roles, ns.prefs.dungeons
+    if stateBatch and (now - stateBatch.sentAt >= ns.TIMEOUT or stateBatch.sentAt > now + 5
+        or stateBatch.signature ~= queueSelectionSignature or stateBatch.guildKey ~= ns.guildKey) then
+        stateBatch = nil
+        ns.state:Remove(ns.playerName)
+        rebuild()
     end
-    if send(ns.Protocol.Encode(packet)) then
-        pendingStateAt, lastSent, lastPresence = nil, GetTime(), GetTime()
-        pendingPresence = false
-        if ns.state:Apply(ns.playerName, packet, now) then
-            rebuild()
+    if not stateBatch then
+        local messages = {}
+        if ns.queued and snapshot.mode == "party" then
+            -- Old clients only understand X/S. Clear a legacy solo once, never
+            -- during heartbeats: receivers retain their last complete party.
+            if partyNeedsClear then
+                messages[1] = ns.Protocol.Encode({ kind = "X", revision = nextRevision(), sentAt = now })
+            end
+            local fragments = ns.Protocol.EncodeParty(nextRevision(), now, ns.joinedAt,
+                ns.prefs.dungeons, snapshot.players)
+            if not fragments then
+                ns.SetQueued(false)
+                return false
+            end
+            for _, fragment in ipairs(fragments) do messages[#messages + 1] = fragment end
+        else
+            local packet = { kind = ns.queued and "S" or "X", revision = nextRevision(), sentAt = now }
+            if ns.queued then
+                packet.joinedAt, packet.roles, packet.dungeons = ns.joinedAt, ns.prefs.roles, ns.prefs.dungeons
+            end
+            messages[1] = ns.Protocol.Encode(packet)
         end
-        return true
+        stateBatch = { messages = messages, index = 1, sentAt = now,
+            signature = queueSelectionSignature, guildKey = ns.guildKey }
     end
-    return false
+    local batch = stateBatch
+    local message = batch.messages[batch.index]
+    local packet = ns.Protocol.Decode(message)
+    if not packet or not send(message) then return false end
+    lastPresence, pendingPresence = GetTime(), false
+    -- A send callback can synchronously change guild, consent or native roster.
+    if ns.queued then reconcileQueued() end
+    if stateBatch ~= batch or batch.guildKey ~= ns.guildKey then return true end
+    if packet.kind == "X" then partyNeedsClear = false end
+    local changed = ns.state:Apply(ns.playerName, packet, GetServerTime())
+    batch.index = batch.index + 1
+    if batch.index > #batch.messages then
+        stateBatch, pendingStateAt, lastSent = nil, nil, GetTime()
+        if changed then rebuild() else ns.RefreshUI() end
+    elseif changed then
+        -- Only an initial withdrawal can change visible state before commit.
+        rebuild()
+    end
+    return true
 end
 
 nextRevision = function()
@@ -1151,6 +1415,7 @@ local function tick()
     local clock = GetTime()
     updateGuild()
     if restrictRoles() then ns.PreferencesChanged() end
+    if ns.queued then reconcileQueued() end
     if localDirty or clock - lastLocalScan >= ns.HEARTBEAT then scanLocalQuests() end
     local serverNow = GetServerTime()
     pruneFormations(serverNow)
@@ -1281,7 +1546,7 @@ local function receive(prefix, message, channel, sender)
             presence[name] = now
             local previous = receivedRoleNotices[name:lower()]
             if packet.target:lower() == ns.playerName:lower() and ns.queued
-                and ns.HasRole(ns.prefs.roles, packet.role)
+                and ns.HasRole(ns.QueueRoles(), packet.role)
                 and (not previous or (packet.sentAt > previous.sentAt and GetTime() - previous.shownAt >= 5)) then
                 receivedRoleNotices[name:lower()] = { sentAt = packet.sentAt, shownAt = GetTime() }
                 printMessage(ns.SafeText(name) .. " requests you as " .. ns.ROLE_NAMES[packet.role]
@@ -1380,21 +1645,27 @@ events:SetScript("OnEvent", function(_, event, ...)
             updateGuild(true)
             ns.RefreshUI()
         end
-    elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_REGEN_DISABLED"
-        or event == "PLAYER_REGEN_ENABLED" then
+    elseif event == "GROUP_ROSTER_UPDATE" or event == "PARTY_LEADER_CHANGED"
+        or event == "PLAYER_ROLES_ASSIGNED" or event == "ROLE_CHANGED_INFORM"
+        or event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED" then
         if started then
+            if ns.queued then reconcileQueued() end
             ns.RefreshUI()
         end
     elseif event == "PLAYER_LOGOUT" then
         if ns.IsReady() then
-            ns.queued = false
+            ns.queued, ns.joinedAt = false, nil
+            queueMode, queueRosterIdentity, queueSelectionSignature = nil, nil, nil
+            stateBatch, partyNeedsClear = nil, false
+            ns.state:Remove(ns.playerName)
             -- Best effort only: peers also expire entries if logout delivery is lost.
             sendState()
         end
     end
 end)
 for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "CHAT_MSG_ADDON",
-    "GUILD_ROSTER_UPDATE", "PLAYER_GUILD_UPDATE", "GROUP_ROSTER_UPDATE",
+    "GUILD_ROSTER_UPDATE", "PLAYER_GUILD_UPDATE", "GROUP_ROSTER_UPDATE", "PARTY_LEADER_CHANGED",
+    "PLAYER_ROLES_ASSIGNED", "ROLE_CHANGED_INFORM",
     "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT", "QUEST_LOG_UPDATE",
     "ZONE_CHANGED_NEW_AREA", "ZONE_CHANGED", "ZONE_CHANGED_INDOORS", "PLAYER_LEVEL_UP" }) do
     events:RegisterEvent(event)

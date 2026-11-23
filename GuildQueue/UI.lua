@@ -179,9 +179,11 @@ end
 
 local function showQueueTooltip(control)
     GameTooltip:SetOwner(control, "ANCHOR_RIGHT")
-    GameTooltip:SetText(ns.queued and "Leave queue" or "Join queue")
-    GameTooltip:AddLine(ns.queued and "Remove yourself from the guild dungeon queue."
-        or ns.JoinQueueDisabledReason() or "Join the guild queue with your selected roles and dungeons.",
+    GameTooltip:SetText(ns.QueueButtonText())
+    GameTooltip:AddLine(ns.queued and "Withdraw your queued entry, including the whole party when you are its leader."
+        or ns.JoinQueueDisabledReason() or (ns.QueueButtonText() == "Queue party"
+            and "Queue your whole party using its assigned roles and your selected dungeons. Members need not be in your guild or have this addon."
+            or "Join the guild queue with your selected roles and dungeons."),
         1, 1, 1, true)
     GameTooltip:Show()
 end
@@ -534,6 +536,10 @@ local function playerTooltip(control, player)
     control.tooltipTitle = ns.SafeText(player.name) .. (player.name == ns.playerName and " (you)" or "")
     control.tooltipText = "Roles: " .. ns.SafeText(ns.RoleText(player.roles))
         .. "\nDungeons: " .. ns.SafeText(ns.DungeonText(player.dungeons))
+    if player.partyLeader then
+        control.tooltipText = control.tooltipText .. "\nQueued party leader: " .. ns.SafeText(player.partyLeader)
+            .. "\nThis party stays together in matches."
+    end
 end
 
 local function acquire(pool, create)
@@ -894,7 +900,7 @@ local function renderOutput(players)
             y = renderPeople(ns.individuals, y)
         end
     else
-        y = heading("All queued guild members (" .. #players .. ")", "Oldest queue entries first", y)
+        y = heading("All queued players (" .. #players .. ")", "Oldest queue entries first", y)
         if #players == 0 then
             y = emptyCard("No guild members are currently queued",
                 "Select your roles and dungeons, then click Join queue to get started.", y)
@@ -959,16 +965,17 @@ function ns.RefreshUI()
     counters.groups:SetText(#ns.groups)
     counters.unmatched:SetText(#ns.individuals)
     counters.online:SetText(ns.OnlineAddonCount())
-    joinButton:SetText(ns.queued and "Leave queue" or "Join queue")
+    joinButton:SetText(ns.QueueButtonText())
     -- Leaving must remain possible when identity/transport/selections are unavailable.
     joinButton:SetEnabled(ns.queued or ns.JoinQueueDisabledReason() == nil)
     paint(joinButton)
+    local queueRoles = ns.QueueRoles()
     for role, control in pairs(roleChecks) do
         local reason = ns.RoleDisabledReason(role)
         control:SetEnabled(reason == nil)
         control.tooltipText = reason or "Select one or more roles available for your class."
-        control.roleIcon:SetDesaturated(reason ~= nil)
-        control:SetChecked(ns.HasRole(ns.prefs.roles, role))
+        control.roleIcon:SetDesaturated(reason ~= nil and not ns.HasRole(queueRoles, role))
+        control:SetChecked(ns.HasRole(queueRoles, role))
         paint(control)
     end
     local selected = 0

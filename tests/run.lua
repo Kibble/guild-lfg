@@ -482,7 +482,11 @@ local function client(options)
     options = options or {}
     local c = { now = 1800000000, clock = 0, sent = {}, messages = {}, invites = {},
         guild = "Test Guild", roster = options.roster or { "Self-TestRealm", "Friend-TestRealm" },
-        result = 0, locked = false, homeGroup = false, instanceGroup = false, combat = false }
+        result = 0, locked = false, homeGroup = false, instanceGroup = false, combat = false,
+        partyLeader = options.partyLeader == nil and true or options.partyLeader,
+        partyRoles = options.partyRoles, partyConnected = options.partyConnected }
+    c.partyLeaderUnavailable, c.partyLeaderError = options.partyLeaderUnavailable, options.partyLeaderError
+    c.roleAssignedUnavailable = options.roleAssignedUnavailable
     c.guildInfoUnavailable, c.nameUnavailable = options.guildInfoUnavailable, options.nameUnavailable
     c.allowedRoles = options.allowedRoles == nil and 7 or options.allowedRoles
     c.rolesUnavailable, c.roleAPIError = options.rolesUnavailable, options.roleAPIError
@@ -537,6 +541,45 @@ local function client(options)
         return c.homeGroup
     end
     env.IsInRaid = function() return c.raid == true end
+    local function partyUnitName(unit)
+        local name, realm = env.UnitFullName(unit)
+        if type(name) ~= "string" or (realm ~= nil and type(realm) ~= "string") then return nil end
+        local character, qualifiedRealm = name:match("^([^%s%-]+)[%s%-]+(.+)$")
+        return (character or name) .. "-" .. (qualifiedRealm or realm or "TestRealm"):gsub("%s", "")
+    end
+    local function partyOverride(values, unit)
+        if type(values) ~= "table" then return nil end
+        if values[unit] ~= nil then return values[unit] end
+        local name = partyUnitName(unit)
+        if name then
+            for key, value in pairs(values) do
+                if type(key) == "string" and key:lower() == name:lower() then return value end
+            end
+        end
+    end
+    env.UnitIsGroupLeader = function(unit, category)
+        equal(unit, "player") equal(category, env.LE_PARTY_CATEGORY_HOME)
+        if c.partyLeaderError then error("Leadership data unavailable") end
+        if c.partyLeaderUnavailable then return nil end
+        return c.partyLeader
+    end
+    env.UnitGroupRolesAssigned = function(unit)
+        if c.roleAssignedUnavailable then return nil end
+        local role = partyOverride(c.partyRoles, unit)
+        if role ~= nil then return role end
+        local name = partyUnitName(unit)
+        local record = name and c.ns.state and c.ns.state:Get(name)
+        local roles = record and record.roles or (unit == "player" and env.GuildQueueDB.roles) or 4
+        for _, assigned in ipairs({ { 1, "TANK" }, { 2, "HEALER" }, { 4, "DAMAGER" } }) do
+            if c.ns.HasRole(roles, assigned[1]) then return assigned[2] end
+        end
+        return "DAMAGER"
+    end
+    env.UnitIsConnected = function(unit)
+        local connected = partyOverride(c.partyConnected, unit)
+        if connected ~= nil then return connected end
+        return true
+    end
     env.GetNumSubgroupMembers = function(category)
         equal(category, env.LE_PARTY_CATEGORY_HOME)
         return c.partyCount or #(c.partyMembers or {})
@@ -986,6 +1029,24 @@ local function suggestedPartial(c, count)
     equal(#c.ns.groups[1].members, count)
     assert(not c.ns.groups[1].slots[1])
     return c.ns.groups[1]
+end
+
+-- Native grouping withdraws a solo queue; only an explicit leader action starts
+-- the replacement party queue. Wait for X + B + every member before using it.
+local function requeueNativeParty(c, members)
+    c.homeGroup, c.partyMembers = true, members or c.partyMembers
+    c:fire("GROUP_ROSTER_UPDATE")
+    assert(not c.ns.queued)
+    c.ns.SetQueued(true)
+    assert(c.ns.queued)
+    c:advance(#c.partyMembers + 6)
+    assert(not c.ns.QueueUpdatePending())
+    for _, group in ipairs(c.ns.groups) do
+        for _, member in ipairs(group.members) do
+            if member.name:lower() == c.ns.playerName:lower() then return group end
+        end
+    end
+    error("Expected a live suggested group for the queued native party")
 end
 
 local function formationClients(count)
@@ -1788,7 +1849,8 @@ test("unrelated home parties raids and instance groups still block the suggested
     local c = client()
     local group = suggestedGroup(c)
     c.homeGroup, c.partyMembers = true, { "Outsider-TestRealm" }
-    assert(c.ns.CreatePartyDisabledReason(group):find("outside", 1, true))
+    assert(c.ns.QueueUpdatePending())
+    assert(c.ns.CreatePartyDisabledReason(group))
     assert(not c.ns.CreateParty(group))
     c.partyMembers, c.raid = { "Friend-TestRealm" }, true
     assert(c.ns.CreatePartyDisabledReason(group):find("raid", 1, true))
@@ -1809,10 +1871,10 @@ end)
 test("Invite Others skips all existing suggested party members and requests only the missing players", function()
     for joined = 1, 3 do
         local c = client()
-        local group = suggestedGroup(c)
-        c.homeGroup, c.partyMembers = true, {}
-        local peers = { "Friend-TestRealm", "D1-TestRealm", "D2-TestRealm" }
-        for i = 1, joined do c.partyMembers[i] = peers[i] end
+        suggestedGroup(c)
+        local members, peers = {}, { "Friend-TestRealm", "D1-TestRealm", "D2-TestRealm" }
+        for i = 1, joined do members[i] = peers[i] end
+        local group = requeueNativeParty(c, members)
         local reason, targets, existingParty = c.ns.CreatePartyDisabledReason(group)
         assert(reason == nil and existingParty)
         equal(#targets, 4 - joined)
@@ -1830,8 +1892,8 @@ test("Invite Others skips all existing suggested party members and requests only
 end)
 test("Invite Others extends partial suggestions but disables when every suggested member has joined", function()
     local c = client()
-    local group = suggestedPartial(c, 2)
-    c.homeGroup, c.partyMembers = true, { "PartialD1-TestRealm" }
+    suggestedPartial(c, 2)
+    local group = requeueNativeParty(c, { "PartialD1-TestRealm" })
     local reason, _, existingParty = c.ns.CreatePartyDisabledReason(group)
     assert(reason:find("already in your party", 1, true) and existingParty)
     assert(not c.ns.CreateParty(group))
@@ -1842,17 +1904,18 @@ test("Invite Others extends partial suggestions but disables when every suggeste
     equal(#c.invites, 1)
     equal(c.invites[1], "NewDamage-TestRealm")
     local full = client()
-    local fullGroup = suggestedGroup(full)
-    full.homeGroup, full.partyFull = true, true
-    full.partyMembers = { "Friend-TestRealm", "D1-TestRealm", "D2-TestRealm", "D3-TestRealm" }
+    suggestedGroup(full)
+    local fullGroup = requeueNativeParty(full,
+        { "Friend-TestRealm", "D1-TestRealm", "D2-TestRealm", "D3-TestRealm" })
+    full.partyFull = true
     assert(full.ns.CreatePartyDisabledReason(fullGroup):find("already in your party", 1, true))
     assert(not full.ns.CreateParty(fullGroup))
     equal(#full.invites, 0)
 end)
 test("Invite Others requires combat safety native invitation permission and available capacity", function()
     local c = client()
-    local group = suggestedGroup(c)
-    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    suggestedGroup(c)
+    local group = requeueNativeParty(c, { "Friend-TestRealm" })
     for _, condition in ipairs({ { "combat", true }, { "partyFull", true }, { "canInvite", false } }) do
         c[condition[1]] = condition[2]
         local reason, _, existingParty = c.ns.CreatePartyDisabledReason(group)
@@ -1868,8 +1931,8 @@ test("Invite Others requires combat safety native invitation permission and avai
 end)
 test("Invite Others fails closed on missing duplicate restricted or invalid party identities", function()
     local c = client()
-    local group = suggestedGroup(c)
-    c.homeGroup = true
+    suggestedGroup(c)
+    local group = requeueNativeParty(c, { "Friend-TestRealm" })
     for _, members in ipairs({ {}, { {} }, { "Friend-TestRealm", "Friend-TestRealm" },
         { { name = "Friend", realm = 12 } }, { "Self-TestRealm" } }) do
         c.partyMembers = members
@@ -1890,8 +1953,8 @@ test("Invite Others fails closed on missing duplicate restricted or invalid part
 end)
 test("Invite Others normalizes party identities without merging characters on different realms", function()
     local c = client()
-    local group = suggestedGroup(c)
-    c.homeGroup = true
+    suggestedGroup(c)
+    local group = requeueNativeParty(c, { "Friend-TestRealm" })
     for _, identity in ipairs({ "Friend", { name = "friend", realm = "Test Realm" },
         { name = "Friend-TestRealm", realm = "IgnoredRealm" } }) do
         c.partyMembers = { identity }
@@ -1901,28 +1964,35 @@ test("Invite Others normalizes party identities without merging characters on di
         for _, name in ipairs(targets) do assert(name ~= "Friend-TestRealm") end
     end
     c.partyMembers = { "Friend-AnotherRealm" }
-    assert(c.ns.CreatePartyDisabledReason(group):find("outside", 1, true))
+    c.partyRoles = { party1 = "HEALER" }
+    assert(c.ns.QueueUpdatePending()) -- Same character name on another realm changes the native roster.
+    assert(c.ns.CreatePartyDisabledReason(group))
     assert(not c.ns.CreateParty(group))
+    assert(not c.ns.queued)
     equal(#c.invites, 0)
 end)
 test("Invite Others rechecks the party roster and current suggestion at the actual click", function()
     local c = client()
-    local group = suggestedGroup(c)
-    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    suggestedGroup(c)
+    local group = requeueNativeParty(c, { "Friend-TestRealm" })
     assert(c.ns.CreatePartyDisabledReason(group) == nil)
     c.partyMembers[2] = "Outsider-TestRealm"
     assert(not c.ns.CreateParty(group))
-    c.partyMembers = { "Friend-TestRealm" }
-    c:receive("Friend-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
-    assert(not c.ns.CreateParty(group)) -- Replaced suggestion.
-    assert(c.ns.CreatePartyDisabledReason(c.ns.groups[1]):find("outside", 1, true))
-    assert(not c.ns.CreateParty(c.ns.groups[1])) -- Party member is no longer suggested.
+    assert(not c.ns.queued)
+    group = requeueNativeParty(c, { "Friend-TestRealm" })
+    c:receive("D1-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
+    assert(not c.ns.CreateParty(group)) -- A missing solo recruit replaces the suggestion.
+    local current = c.ns.groups[1]
+    equal(#current.members, 4)
+    assert(c.ns.CreatePartyDisabledReason(current) == nil)
+    c.partyRoles = { player = "HEALER", party1 = "TANK" } -- Native roles change after rendering.
+    assert(not c.ns.CreateParty(current))
     equal(#c.invites, 0)
 end)
 test("Invite Others shares member cooldowns with individual invitations", function()
     local c = client()
-    local group = suggestedGroup(c)
-    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    suggestedGroup(c)
+    local group = requeueNativeParty(c, { "Friend-TestRealm" })
     assert(c.ns.InviteQueuedPlayer("D1-TestRealm"))
     assert(not c.ns.CreateParty(group))
     equal(#c.invites, 1)
@@ -1933,8 +2003,9 @@ test("Invite Others shares member cooldowns with individual invitations", functi
 end)
 test("Invite Others contains request failures without retrying or reinviting current members", function()
     local c = client()
-    local group = suggestedGroup(c)
-    c.homeGroup, c.partyMembers, c.failInvite = true, { "Friend-TestRealm" }, "D1-TestRealm"
+    suggestedGroup(c)
+    local group = requeueNativeParty(c, { "Friend-TestRealm" })
+    c.failInvite = "D1-TestRealm"
     assert(not c.ns.CreateParty(group))
     equal(#c.invites, 2)
     for _, name in ipairs(c.invites) do assert(name == "D2-TestRealm" or name == "D3-TestRealm") end
@@ -2955,6 +3026,17 @@ test("minimap tooltip receives update evidence while the main window is unopened
     equal(#c.sent, 0) equal(#c.invites, 0)
 end)
 
+local function suggestedPartyControl(c, widgets)
+    for _, control in ipairs(widgets) do
+        if control.guildQueueKind == "party" and control.shown and control.group then
+            for _, group in ipairs(c.ns.groups) do
+                if control.group == group then return control end
+            end
+        end
+    end
+    error("Expected a live suggested-party control")
+end
+
 local function roleListUI(c)
     local widgets, views, tabs = openUI(c), {}, {}
     for _, control in ipairs(widgets) do
@@ -3008,7 +3090,7 @@ test("enabling queue view buttons restores All queued rendering and the original
     local people, heading = 0, false
     for _, control in ipairs(widgets) do
         if control.guildQueueKind == "individual" and control.shown then people = people + 1 end
-        if control.shown and control.title and control.title.text == "All queued guild members (5)" then heading = true end
+        if control.shown and control.title and control.title.text == "All queued players (5)" then heading = true end
         if control.guildQueueKind == "group" then assert(not control.shown) end
     end
     equal(people, 5) assert(heading)
@@ -3200,7 +3282,7 @@ test("Role List uses party-wide shared dungeons role-specific clicks and already
     c:advance(1)
     c:receive("Tank-TestRealm", packet(1, 1, nil, c.now, c.now))
     c:receive("Flexible-TestRealm", packet(1, 7, nil, c.now, c.now))
-    c.homeGroup, c.partyMembers = true, { "Tank-TestRealm" }
+    requeueNativeParty(c, { "Tank-TestRealm" })
     local widgets = roleListUI(c)
     local tank, selfCard, recruit
     for _, widget in ipairs(widgets) do
@@ -3900,24 +3982,25 @@ test("Create party button is hoverable when disabled and tracks party changes", 
     local c = client()
     suggestedGroup(c)
     local widgets = openUI(c)
-    local control
-    for _, candidate in ipairs(widgets) do
-        if candidate.guildQueueKind == "party" then control = candidate end
-    end
-    assert(control and control.enabled and control.shown)
-    assert(control.motionWhileDisabled)
+    local control = suggestedPartyControl(c, widgets)
+    assert(control.enabled and control.motionWhileDisabled)
+    control.scripts.OnEnter(control)
+    assert(c.tooltip.shown)
     equal(#c.invites, 0)
     c.homeGroup, c.partyMembers = true, { "Outsider-TestRealm" }
     c:fire("GROUP_ROSTER_UPDATE")
-    assert(not control.enabled)
-    equal(control.text, "Create party")
-    control.scripts.OnEnter(control)
-    assert(c.tooltip.shown)
-    equal(c.tooltip.text, "Your party includes a player outside your current suggested group.")
-    -- Leaving the party updates both the button and an already-visible tooltip.
+    assert(not c.ns.queued and not control.shown and control.group == nil)
+    assert(not c.tooltip.shown)
+    control.scripts.OnClick(control) -- A pooled former control cannot invite the old suggestion.
+    equal(#c.invites, 0)
     c.homeGroup = false
     c:fire("GROUP_ROSTER_UPDATE")
+    assert(not c.ns.queued and not control.shown) -- Leaving never auto-rejoins.
+    c.ns.SetQueued(true)
+    c:advance(1)
+    control = suggestedPartyControl(c, widgets)
     assert(control.enabled)
+    control.scripts.OnEnter(control)
     assert(c.tooltip.text:find("Invite the other matched", 1, true))
     c.combat = true
     c:fire("PLAYER_REGEN_DISABLED")
@@ -3945,8 +4028,8 @@ test("suggested-party action changes to Invite Others only for an eligible exist
     local control
     for _, widget in ipairs(widgets) do if widget.guildQueueKind == "party" then control = widget end end
     equal(control.text, "Create party")
-    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
-    c:fire("GROUP_ROSTER_UPDATE")
+    requeueNativeParty(c, { "Friend-TestRealm" })
+    control = suggestedPartyControl(c, widgets)
     assert(control.enabled)
     equal(control.text, "Invite Others")
     control.scripts.OnEnter(control)
@@ -3962,50 +4045,60 @@ test("suggested-party action changes to Invite Others only for an eligible exist
     assert(control.enabled)
     c.homeGroup = false
     c:fire("GROUP_ROSTER_UPDATE")
+    assert(not c.ns.queued and not control.shown and not c.tooltip.shown)
+    c.ns.SetQueued(true)
+    c:advance(3) -- Release the old formation before broadcasting the new solo queue.
+    assert(not c.ns.QueueUpdatePending())
+    control = suggestedPartyControl(c, widgets)
     assert(control.enabled)
     equal(control.text, "Create party")
+    control.scripts.OnEnter(control)
     equal(c.tooltip.title, "Create party")
 end)
 test("Invite Others button tracks permission combat completed party and unrelated-party changes", function()
     local c = client()
     suggestedGroup(c)
-    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    requeueNativeParty(c, { "Friend-TestRealm" })
     local widgets = openUI(c)
-    local control
-    for _, widget in ipairs(widgets) do if widget.guildQueueKind == "party" then control = widget end end
+    local control = suggestedPartyControl(c, widgets)
     control.scripts.OnEnter(control)
-    for _, condition in ipairs({ { "canInvite", false }, { "combat", true } }) do
+    for _, condition in ipairs({ { "canInvite", false, "permission" }, { "combat", true, "combat" },
+        { "partyFull", true, "full" } }) do
         c[condition[1]] = condition[2]
         c:fire("GROUP_ROSTER_UPDATE")
         assert(not control.enabled)
         equal(control.text, "Invite Others")
+        assert(c.tooltip.text:find(condition[3], 1, true))
         c[condition[1]] = nil
+        c:fire("GROUP_ROSTER_UPDATE")
+        assert(control.enabled)
     end
-    c.partyMembers = { "Friend-TestRealm", "D1-TestRealm", "D2-TestRealm", "D3-TestRealm" }
-    c:fire("GROUP_ROSTER_UPDATE")
+    requeueNativeParty(c, { "Friend-TestRealm", "D1-TestRealm", "D2-TestRealm", "D3-TestRealm" })
+    control = suggestedPartyControl(c, widgets)
+    control.scripts.OnEnter(control)
     assert(not control.enabled)
     equal(control.text, "Invite Others")
     assert(c.tooltip.text:find("already in your party", 1, true))
     c.partyMembers = { "Friend-TestRealm", "Outsider-TestRealm" }
     c:fire("GROUP_ROSTER_UPDATE")
-    assert(not control.enabled)
-    equal(control.text, "Create party")
-    assert(c.tooltip.text:find("outside", 1, true))
+    assert(not c.ns.queued and not control.shown and control.group == nil)
+    assert(not c.tooltip.shown)
+    control.scripts.OnClick(control)
     equal(#c.invites, 0)
 end)
 test("Invite Others does not trust eligibility rendered before a party change", function()
     local c = client()
     suggestedGroup(c)
-    c.homeGroup, c.partyMembers = true, { "Friend-TestRealm" }
+    requeueNativeParty(c, { "Friend-TestRealm" })
     local widgets = openUI(c)
-    local control
-    for _, widget in ipairs(widgets) do if widget.guildQueueKind == "party" then control = widget end end
+    local control = suggestedPartyControl(c, widgets)
     assert(control.enabled and control.text == "Invite Others")
+    control.scripts.OnEnter(control)
     c.partyMembers[2] = "Outsider-TestRealm" -- No UI refresh before clicking.
     control.scripts.OnClick(control)
     equal(#c.invites, 0)
-    assert(not control.enabled)
-    equal(control.text, "Create party")
+    assert(not c.ns.queued and not control.shown and control.group == nil)
+    assert(not c.tooltip.shown)
 end)
 
 test("Create party controls hide on the all-queued tab without issuing invites", function()
@@ -4574,6 +4667,8 @@ test("all addon chunks compile as Lua 5.1", function()
         assert(loadfile("GuildQueue/" .. module .. ".lua"))
     end
 end)
+
+assert(loadfile("tests/party_core.lua"))(test, equal, client, openUI, packet, suggestedGroup)
 
 print(string.format("\n%d passed; %d failed", passed, failed))
 if failed > 0 then os.exit(1) end

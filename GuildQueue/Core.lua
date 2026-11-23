@@ -116,21 +116,24 @@ local function nativeGrouped()
 end
 
 function ns.UsesPartyRoles()
-    return (ns.queued and queueMode == "party") or nativeGrouped()
+    -- Unknown leadership stays read-only; confirmed nonleaders edit their own
+    -- flexible selections, even while a leader's listing shadows their entry.
+    return (ns.queued and queueMode == "party") or (nativeGrouped()
+        and safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) ~= false)
 end
 
 function ns.QueueButtonText()
     if ns.queued then return queueMode == "party" and "Leave party queue" or "Leave queue" end
-    return nativeGrouped() and "Queue party" or "Join queue"
+    return ns.UsesPartyRoles() and "Queue party" or "Join queue"
 end
 
 function ns.QueueRoles()
-    if nativeGrouped() then return assignedRole("player") end
+    if ns.UsesPartyRoles() then return assignedRole("player") end
     return ns.prefs and ns.prefs.roles or 0
 end
 
 function ns.RoleDisabledReason(role)
-    if nativeGrouped() then
+    if ns.UsesPartyRoles() then
         return "Party roles come from WoW's party controls. Assign roles there, including the leader's role."
     end
     local allowed = ns.AllowedRoles()
@@ -304,7 +307,7 @@ function ns.StatusText()
     elseif transportError then
         return transportError
     end
-    return "Party leaders in this guild can queue their whole party. Solo players select roles and dungeons, then join."
+    return "Party leaders can queue their whole party. Other players can join individually with selected roles and dungeons."
 end
 
 function ns.JoinQueueDisabledReason()
@@ -358,6 +361,14 @@ local function freshQueueRecord(name, now)
     local record = recordName and ns.state:Get(recordName)
     if not queueRecordFresh(record, now) or record.name:lower() ~= name:lower() then return nil end
     return record
+end
+
+function ns.PartyQueueLeader()
+    if not ns.IsReady() then return nil end
+    local record = freshQueueRecord(ns.playerName, GetServerTime())
+    if record and record.partyLeader and record.partyLeader:lower() ~= ns.playerName:lower() then
+        return record.partyLeader
+    end
 end
 
 local function matchupFingerprint(group, now)
@@ -638,7 +649,7 @@ end
 
 -- Dungeon recruitment needs a normal home party. Quests can additionally
 -- inspect a home raid without imposing dungeon or queued-preference rules.
-actualPartyMembers = function(allowRaid, allowEmptyParty)
+actualPartyMembers = function(allowRaid, allowEmptyParty, allowIndividual)
     local homeGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_HOME)
     local instanceGroup = safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE)
     if type(homeGroup) ~= "boolean" or type(instanceGroup) ~= "boolean" then
@@ -658,6 +669,11 @@ actualPartyMembers = function(allowRaid, allowEmptyParty)
     local currentSelf = unitName("player")
     if not currentSelf or currentSelf:lower() ~= self:lower() then
         return nil, "Your party identity is unavailable right now."
+    end
+    -- An individual advertisement needs only this player's identity, not the
+    -- other members' names or assigned roles. Invitations still require all of them.
+    if allowIndividual and safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) == false then
+        return snapshot
     end
     local counter = GetNumSubgroupMembers
     if raid then counter = GetNumGroupMembers end
@@ -691,10 +707,17 @@ end
 
 nativeQueueSnapshot = function(snapshot)
     local reason
-    if not snapshot then snapshot, reason = actualPartyMembers() end
+    if not snapshot then snapshot, reason = actualPartyMembers(false, false, true) end
     if not snapshot then return nil, reason end
-    snapshot.mode = snapshot.homeGroup and "party" or "solo"
-    if not snapshot.homeGroup then
+    snapshot.mode = "solo"
+    if snapshot.homeGroup then
+        local leader = safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME)
+        if type(leader) ~= "boolean" then
+            return nil, "Your party leadership information is unavailable right now."
+        end
+        if leader then snapshot.mode = "party" end
+    end
+    if snapshot.mode == "solo" then
         local allowed = ns.AllowedRoles()
         if not allowed then return nil, "Waiting for your class role information." end
         if ns.FilterRoles(ns.prefs.roles, allowed) ~= ns.prefs.roles then
@@ -708,9 +731,6 @@ nativeQueueSnapshot = function(snapshot)
             .. ns.Protocol.DungeonList(ns.prefs.dungeons)
         return snapshot
     end
-    local leader = safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME)
-    if type(leader) ~= "boolean" then return nil, "Your party leadership information is unavailable right now." end
-    if not leader then return nil, "Only the native party leader can queue the whole party." end
     local players = { { name = ns.playerName } }
     for _, name in ipairs(snapshot.members) do players[#players + 1] = { name = name } end
     table.sort(players, function(a, b) return a.name:lower() < b.name:lower() end)
@@ -854,6 +874,9 @@ function ns.CreatePartyDisabledReason(group)
         return "Party invitations are unavailable on this client.", nil, homeGroup
     end
     if homeGroup then
+        if safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME) ~= true then
+            return "Only your party leader can recruit for this party.", nil, true
+        end
         local full = safeCall(C_PartyInfo.IsPartyFull, LE_PARTY_CATEGORY_HOME)
         local allowed = safeCall(C_PartyInfo.CanInvite)
         if type(full) ~= "boolean" or type(allowed) ~= "boolean" then
@@ -988,7 +1011,7 @@ function ns.SetQueued(wanted)
     ns.RefreshUI()
 end
 
-local function pausePartyListing()
+local function pauseQueueListing()
     if not partyUpdatePaused then
         partyUpdatePaused, partyWithdrawalPending, stateBatch = true, true, nil
         ns.state:Remove(ns.playerName)
@@ -1025,25 +1048,37 @@ reconcileQueued = function()
             return nil
         end
         if home ~= true or instance ~= false or raid ~= false or leader ~= true then
-            pausePartyListing()
+            pauseQueueListing()
             return nil
         end
     end
-    local roster = actualPartyMembers()
-    local mode = roster and (roster.homeGroup and "party" or "solo")
-    if not roster or mode ~= queueMode then
-        if queueMode == "party" then pausePartyListing() else ns.SetQueued(false) end
+    local roster = actualPartyMembers(false, false, true)
+    if not roster then
+        if queueMode == "party" or (safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE) ~= true
+            and safeCall(IsInRaid, LE_PARTY_CATEGORY_HOME) ~= true) then
+            pauseQueueListing()
+        else
+            ns.SetQueued(false)
+        end
         return nil
     end
     local snapshot = nativeQueueSnapshot(roster)
     if not snapshot then
-        -- Roster/role information can lag behind a join or role change. Keep
-        -- the leader's intent, but withdraw the unusable listing until valid.
-        if mode == "party" then pausePartyListing()
+        -- Unknown leadership must not discard an individual queue or enroll a
+        -- party. Keep intent unpublished until the native information resolves.
+        if queueMode == "party" or (roster.homeGroup
+            and type(safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME)) ~= "boolean") then
+            pauseQueueListing()
         elseif ns.AllowedRoles() then ns.SetQueued(false) end
         return nil
     end
-    if mode ~= "party" and snapshot.identity ~= queueRosterIdentity then
+    -- A change of leadership never automatically enrolls a whole party or
+    -- turns a former leader's whole-party intent into an individual entry.
+    if snapshot.mode ~= queueMode then
+        ns.SetQueued(false)
+        return nil
+    end
+    if snapshot.mode ~= "party" and snapshot.identity ~= queueRosterIdentity then
         ns.SetQueued(false)
         return nil
     end

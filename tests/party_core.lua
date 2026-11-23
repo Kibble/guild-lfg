@@ -72,22 +72,206 @@ test("party fragments expose no partial group locally or on another guild client
     equal(#c.invites, 0) equal(#observer.invites, 0)
 end)
 
-test("nonleaders cannot queue via API slash command or UI even with invite permission", function()
-    local c = party({ partyLeader = false })
-    assert(c.ns.JoinQueueDisabledReason():find("leader", 1, true))
-    c.ns.SetQueued(true) assert(not c.ns.queued)
-    c.env.SlashCmdList.GUILDQUEUE("join") assert(not c.ns.queued)
-    local join = controls(c)
-    equal(join.text, "Queue party") assert(not join.enabled and join.motionWhileDisabled)
-    join.scripts.OnEnter(join)
-    assert(table.concat(c.tooltip.lines, "\n"):find("leader", 1, true))
-    join.scripts.OnClick(join) assert(not c.ns.queued)
-    c:advance(10)
-    for _, message in ipairs(c.sent) do
-        local p = c.ns.Protocol.Decode(message.text)
-        assert(p.kind ~= "S" and p.kind ~= "B" and p.kind ~= "C")
+test("nonleaders queue individually through API slash command and UI with flexible class roles", function()
+    for _, action in ipairs({ "api", "slash", "ui" }) do
+        local c = party({ partyLeader = false, roleAssignedUnavailable = true, allowedRoles = 6,
+            saved = { roles = 6, dungeons = { [1] = true } } })
+        equal(c.ns.JoinQueueDisabledReason(), nil)
+        local join, roles = controls(c)
+        equal(join.text, "Join queue") assert(join.enabled)
+        assert(not c.ns.UsesPartyRoles()) equal(c.ns.QueueRoles(), 6)
+        assert(roles[2].shown and roles[2].enabled and roles[2]:GetChecked())
+        assert(roles[4].shown and roles[4].enabled and roles[4]:GetChecked())
+        assert(roles[1].shown and not roles[1].enabled)
+        if action == "api" then c.ns.SetQueued(true)
+        elseif action == "slash" then c.env.SlashCmdList.GUILDQUEUE("join")
+        else join.scripts.OnClick(join) end
+        c:advance(8)
+        assert(c.ns.queued and not c.ns.QueueUpdatePending())
+        local record = c.ns.state.records[c.ns.playerName]
+        equal(record.roles, 6) equal(record.partyMembers, nil)
+        equal(#c.ns.state:Sorted(), 1) equal(join.text, "Leave queue")
+        for _, message in ipairs(c.sent) do
+            local p = c.ns.Protocol.Decode(message.text)
+            assert(p.kind ~= "B" and p.kind ~= "C")
+        end
+        equal(#c.invites, 0)
     end
+end)
+
+local function memberPartyClients()
+    local member = party({ characterName = "Member", partyLeader = false, allowedRoles = 6,
+        saved = { roles = 6, dungeons = { [1] = true } },
+        partyRoles = { player = "HEALER", party1 = "TANK" } })
+    local leader = party({ characterName = "Leader",
+        saved = { roles = 0, dungeons = { [2] = true } } })
+    local observer = client({ characterName = "Observer" })
+    member.partyMembers, leader.partyMembers = { leader.ns.playerName }, { member.ns.playerName }
+    link(member, leader) link(member, observer)
+    link(leader, member) link(leader, observer)
+    queued(member)
+    return member, leader, observer
+end
+
+test("only a complete leader listing overrides individual roles and dungeons without duplicates", function()
+    local member, leader, observer = memberPartyClients()
+    local join, roles, widgets = controls(member)
+    leader.ns.SetQueued(true) leader:advance(3)
+    equal(observer.ns.state:Get(member.ns.playerName).roles, 6)
+    equal(member.ns.PartyQueueLeader(), nil)
+    leader:advance(1)
+    for _, c in ipairs({ member, leader, observer }) do
+        local effective = c.ns.state:Get(member.ns.playerName)
+        equal(effective.partyLeader, leader.ns.playerName) equal(effective.roles, 2)
+        assert(effective.dungeons[2] and not effective.dungeons[1])
+        equal(#c.ns.state:Sorted(), 2)
+        equal(c.ns.state.records[member.ns.playerName].roles, 6)
+        equal(#c.invites, 0)
+    end
+    assert(member.ns.queued and not member.ns.QueueUpdatePending())
+    equal(member.ns.PartyQueueLeader(), leader.ns.playerName)
+    assert(roles[2].shown and roles[2]:GetChecked() and roles[4].shown and roles[4]:GetChecked())
+    local statusShown = false
+    for _, control in ipairs(widgets) do if control.text == "Party queued" then statusShown = true end end
+    assert(statusShown)
+    join.scripts.OnEnter(join)
+    local tooltip = table.concat(member.tooltip.lines, "\n")
+    assert(tooltip:find(leader.ns.playerName, 1, true) and tooltip:find("override", 1, true))
+    observer.ns.prefs.dungeons = { [2] = true }
+    local lists = observer.ns.GetRoleLists()
+    equal(#lists[1], 1) equal(#lists[2], 1) equal(#lists[4], 0)
+    member:advance(22)
+    equal(#observer.ns.state:Sorted(), 2)
+    equal(observer.ns.state:Get(member.ns.playerName).roles, 2)
+end)
+
+test("leader withdrawal restores the latest individual selections with original queue age", function()
+    local member, leader, observer = memberPartyClients()
+    local age = member.ns.joinedAt
+    queued(leader)
+    member.ns.prefs.roles, member.ns.prefs.dungeons = 4, { [3] = true }
+    member.ns.PreferencesChanged()
+    assert(member.ns.queued and member.ns.QueueUpdatePending())
+    equal(member.ns.PartyQueueLeader(), leader.ns.playerName)
+    member:advance(2)
+    equal(observer.ns.state:Get(member.ns.playerName).roles, 2)
+    leader.ns.SetQueued(false) leader:advance(2)
+    for _, c in ipairs({ member, leader, observer }) do
+        local effective = c.ns.state:Get(member.ns.playerName)
+        equal(effective.partyLeader, nil) equal(effective.roles, 4)
+        assert(effective.dungeons[3] and not effective.dungeons[2])
+        equal(effective.joinedAt, age) equal(#c.ns.state:Sorted(), 1)
+        equal(#c.invites, 0)
+    end
+    assert(member.ns.queued and not member.ns.QueueUpdatePending())
+    equal(member.ns.PartyQueueLeader(), nil)
+end)
+
+test("leaving an overridden individual queue cannot withdraw the party or later rejoin", function()
+    local member, leader, observer = memberPartyClients()
+    queued(leader)
+    member.ns.SetQueued(false) member:advance(2)
+    assert(not member.ns.queued)
+    for _, c in ipairs({ member, leader, observer }) do
+        equal(c.ns.state.records[member.ns.playerName], nil)
+        equal(c.ns.state:Get(member.ns.playerName).partyLeader, leader.ns.playerName)
+        equal(#c.ns.state:Sorted(), 2)
+    end
+    equal(member.ns.PartyQueueLeader(), leader.ns.playerName)
+    leader.ns.SetQueued(false) leader:advance(2) member:advance(22)
+    equal(member.ns.PartyQueueLeader(), nil)
+    for _, c in ipairs({ member, leader, observer }) do
+        equal(c.ns.state:Get(member.ns.playerName), nil)
+        equal(#c.invites, 0)
+    end
+end)
+
+test("expired party listings uncover independently heartbeating individual members", function()
+    local member, leader, observer = memberPartyClients()
+    local age = member.ns.joinedAt
+    queued(leader)
+    -- The leader no longer ticks; the member continues its own S heartbeats.
+    member:advance(member.ns.TIMEOUT + 2)
+    -- Receiving packets alone advances the observer only to the last send time.
+    observer.now = member.now observer:advance(1)
+    for _, c in ipairs({ member, observer }) do
+        local effective = c.ns.state:Get(member.ns.playerName)
+        equal(effective.partyLeader, nil) equal(effective.roles, 6)
+        equal(effective.joinedAt, age) equal(#c.ns.state:Sorted(), 1)
+        equal(#c.invites, 0)
+    end
+    assert(member.ns.queued) equal(member.ns.PartyQueueLeader(), nil)
+end)
+
+test("removing an individually queued member uncovers that entry without splitting the remaining party", function()
+    local member, leader, observer = memberPartyClients()
+    leader.partyMembers[2], leader.partyRoles.party2 = "Guest-OtherRealm", "DAMAGER"
+    queued(leader)
+    equal(#observer.ns.state:Sorted(), 3)
+    member.homeGroup, member.partyMembers = false, {}
+    member:fire("GROUP_ROSTER_UPDATE")
+    leader.partyMembers, leader.partyRoles.party1 = { "Guest-OtherRealm" }, "DAMAGER"
+    leader:fire("GROUP_ROSTER_UPDATE") leader:advance(8)
+    for _, c in ipairs({ member, leader, observer }) do
+        equal(c.ns.state:Get(member.ns.playerName).partyLeader, nil)
+        equal(c.ns.state:Get(member.ns.playerName).roles, 6)
+        equal(c.ns.state:Get("Guest-OtherRealm").partyLeader, leader.ns.playerName)
+        equal(#c.ns.state:Sorted(), 3) equal(#c.invites, 0)
+    end
+    assert(member.ns.queued)
+end)
+
+test("nonleader selections can be edited through real role controls while queued", function()
+    local c = party({ partyLeader = false, saved = { roles = 6, dungeons = { [1] = true } } })
+    queued(c)
+    local age = c.ns.joinedAt
+    local _, roles = controls(c)
+    roles[4]:SetChecked(false) roles[4].scripts.OnClick(roles[4]) c:advance(2)
+    equal(c.ns.state.records[c.ns.playerName].roles, 2)
+    roles[1]:SetChecked(true) roles[1].scripts.OnClick(roles[1]) c:advance(2)
+    equal(c.ns.state.records[c.ns.playerName].roles, 3)
+    equal(c.ns.joinedAt, age) equal(#c.ns.state:Sorted(), 1)
+    equal(c.ns.state.records[c.ns.playerName].partyMembers, nil)
     equal(#c.invites, 0)
+end)
+
+test("individual queues do not depend on peers' roster data and pause through unknown leadership", function()
+    for _, unavailable in ipairs({ "partyLeaderUnavailable", "partyLeaderError" }) do
+        local c = party({ partyLeader = false })
+        queued(c)
+        local age = c.ns.joinedAt
+        c.partyMembers, c.partyCount = {}, 1
+        c:fire("GROUP_ROSTER_UPDATE") c:advance(2)
+        assert(c.ns.queued and not c.ns.QueueUpdatePending())
+        c[unavailable] = true c:fire("PARTY_LEADER_CHANGED") c:advance(3)
+        assert(c.ns.queued and c.ns.QueueUpdatePending()) equal(#c.ns.state:Sorted(), 0)
+        c[unavailable] = false c:fire("PARTY_LEADER_CHANGED") c:advance(3)
+        assert(c.ns.queued and not c.ns.QueueUpdatePending()) equal(c.ns.joinedAt, age)
+        equal(#c.ns.state:Sorted(), 1) equal(#c.invites, 0)
+    end
+end)
+
+test("nonleader individual queueing cannot bypass raid or instance restrictions", function()
+    for _, mode in ipairs({ "raid", "instanceGroup" }) do
+        local c = party({ partyLeader = false })
+        c[mode] = true
+        assert(c.ns.JoinQueueDisabledReason())
+        c.ns.SetQueued(true) assert(not c.ns.queued)
+        c:advance(3) noPartyPacketsAfter(c, 0)
+        equal(#c.invites, 0)
+    end
+end)
+
+test("individually queued nonleaders cannot start a native-party recruitment batch", function()
+    local c = client({ partyLeader = false })
+    local group = suggestedGroup(c)
+    c.homeGroup, c.partyMembers = true, { group.members[2].name }
+    c:fire("GROUP_ROSTER_UPDATE")
+    assert(c.ns.queued)
+    local reason = c.ns.CreatePartyDisabledReason(group)
+    assert(reason and reason:find("leader", 1, true))
+    assert(not c.ns.CreateParty(group))
+    c:advance(3) equal(#c.invites, 0)
 end)
 
 test("a non-guild leader still cannot publish a party to the guild channel", function()
@@ -185,8 +369,8 @@ test("leaving a party restores saved solo role controls and clears the old role 
     equal(#c.sent, 0) equal(#c.invites, 0)
 end)
 
-test("nonleaders and members with unassigned roles also see WoW party role instructions instead of checkboxes", function()
-    for _, options in ipairs({ { partyLeader = false }, { roleAssignedUnavailable = true } }) do
+test("leaders with unavailable roles or leadership still see read-only WoW party instructions", function()
+    for _, options in ipairs({ { partyLeaderUnavailable = true }, { roleAssignedUnavailable = true } }) do
         local c = party(options)
         local join, roles, widgets = controls(c)
         assert(not join.enabled)
@@ -332,13 +516,15 @@ test("party leadership handoff removes the old queue and requires the new leader
     c.partyLeader = false c:fire("PARTY_LEADER_CHANGED")
     assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
     local count = #c.sent c:advance(10) noPartyPacketsAfter(c, count)
-    c.ns.SetQueued(true) assert(not c.ns.queued)
+    local individual = queued(c)
+    equal(individual.partyMembers, nil) equal(#c.ns.state:Sorted(), 1)
     c.partyLeader = true c:fire("PARTY_LEADER_CHANGED") c:advance(2)
-    assert(not c.ns.queued)
-    queued(c) equal(#c.ns.state:Sorted(), 2)
+    assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
+    equal(queued(c).partyLeader, c.ns.playerName)
+    equal(#c.ns.state:Sorted(), 2)
 end)
 
-test("queued leader roster changes update in place while disbanding and initial grouping still withdraw", function()
+test("queued roster changes preserve individual nonleaders but never automatically enroll a whole party", function()
     for _, change in ipairs({ "join", "replace" }) do
         local c = party() queued(c)
         local age = c.ns.joinedAt
@@ -356,11 +542,23 @@ test("queued leader roster changes update in place while disbanding and initial 
     disbanded:fire("GROUP_ROSTER_UPDATE")
     assert(not disbanded.ns.queued) equal(#disbanded.ns.state:Sorted(), 0)
     local count = #disbanded.sent disbanded:advance(8) noPartyPacketsAfter(disbanded, count)
-    local c = client() queued(c)
-    c.homeGroup, c.partyMembers, c.partyLeader = true, { "Guest-OtherRealm" }, false
-    c:fire("GROUP_ROSTER_UPDATE")
-    assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
-    c.ns.SetQueued(true) assert(not c.ns.queued)
+    for _, isLeader in ipairs({ false, true }) do
+        local c = client() queued(c)
+        local age = c.ns.joinedAt
+        c.homeGroup, c.partyMembers, c.partyLeader = true, { "Guest-OtherRealm" }, isLeader
+        c:fire("GROUP_ROSTER_UPDATE") c:advance(2)
+        equal(c.ns.queued, not isLeader)
+        if isLeader then
+            equal(#c.ns.state:Sorted(), 0)
+        else
+            equal(#c.ns.state:Sorted(), 1) equal(c.ns.joinedAt, age)
+            equal(c.ns.state.records[c.ns.playerName].partyMembers, nil)
+            c.homeGroup, c.partyMembers = false, {}
+            c:fire("GROUP_ROSTER_UPDATE") c:advance(2)
+            assert(c.ns.queued) equal(c.ns.joinedAt, age)
+        end
+        equal(#c.invites, 0)
+    end
 end)
 
 test("lost roster and role events are still checked before every queued transmission", function()
@@ -620,6 +818,9 @@ test("synchronous outsider or lost-leadership events still stop the authorized i
             c:fire("GROUP_ROSTER_UPDATE")
         end
         assert(not c.ns.CreateParty(group)) equal(#c.invites, 1)
-        assert(not c.ns.queued)
+        -- A now-nonleader can keep looking individually, but never completes
+        -- invitations after losing native party leadership.
+        equal(c.ns.queued, not outsider)
+        c:advance(3) equal(#c.invites, 1)
     end
 end)

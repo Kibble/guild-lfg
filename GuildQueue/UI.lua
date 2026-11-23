@@ -186,9 +186,16 @@ local function showQueueTooltip(control)
             and "Queue your whole party using its assigned roles and your selected dungeons. Members need not be in your guild or have this addon."
             or "Join the guild queue with your selected roles and dungeons."),
         1, 1, 1, true)
-    if ns.queued and ns.QueueUpdatePending() then
+    local leader = ns.PartyQueueLeader()
+    if leader then
+        GameTooltip:AddLine("Included in " .. ns.SafeText(leader)
+            .. "'s party queue. Their assigned roles and dungeons override your individual selections.", 1, 1, 1, true)
+        GameTooltip:AddLine(ns.queued
+            and "Your individual entry resumes when the party listing ends, unless you leave it. Leaving does not withdraw your leader's party listing."
+            or "You can join individually now; your entry becomes visible when the party listing ends.", 1, 1, 1, true)
+    elseif ns.queued and ns.QueueUpdatePending() then
         GameTooltip:AddLine(ns.JoinQueueDisabledReason()
-            or "Updating your party listing with its current roster and roles.", 1, 1, 1, true)
+            or "Updating your queue listing with its current roles and dungeons.", 1, 1, 1, true)
     end
     GameTooltip:Show()
 end
@@ -962,10 +969,12 @@ function ns.RefreshUI()
     local players = ns.state:Sorted()
     guildLabel:SetText(ns.SafeText(ns.guildName or "No guild"))
     status:SetText(ns.SafeText(ns.StatusText()))
+    local partyLeader = ns.PartyQueueLeader()
     local stateText = ns.queued and "Queued" or "Not queued"
     if ns.QueueUpdatePending() then stateText = "Waiting to broadcast" end
+    if partyLeader then stateText = "Party queued" end
     queueStatus:SetText(stateText)
-    colorText(queueStatus, ns.queued and C.green or C.muted)
+    colorText(queueStatus, (ns.queued or partyLeader) and C.green or C.muted)
     counters.queued:SetText(#players)
     counters.groups:SetText(#ns.groups)
     counters.unmatched:SetText(#ns.individuals)

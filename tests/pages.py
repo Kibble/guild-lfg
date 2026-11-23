@@ -89,18 +89,23 @@ class DownloadsSiteTests(unittest.TestCase):
                 self.assertIn(link[1:], page.ids)
         self.assertEqual(outputs[self.root / "docs/.nojekyll"], b"")
 
-    def test_previews_are_labeled_and_never_replace_the_latest_released_primary_download(self):
-        text = pages.generated_files(self.root)[self.root / "docs/index.html"].decode()
+    def test_latest_release_is_primary_and_previews_do_not_replace_it(self):
         releases = pages.load_releases(self.root)
+        text = pages.generated_files(self.root)[self.root / "docs/index.html"].decode()
         primary = next(release for release in releases if release["status"] == "released")
+        self.assertEqual(primary["version"], releases[0]["version"])
         self.assertIn('href="' + primary["download"] + '" download>Download release · v' + primary["version"], text)
-        self.assertEqual(text.count("Upcoming · Preview build"), sum(r["status"] == "preview" for r in releases))
-        for entry in self.entries:
-            entry["status"] = "released"
+        self.assertEqual(text.count("Upcoming · Preview build"), 0)
+
+        self.entries[0]["status"] = "preview"
         self.manifest(self.entries)
-        promoted = pages.generated_files(self.root)[self.root / "docs/index.html"].decode()
-        self.assertIn('download>Download release · v' + releases[0]["version"], promoted)
-        self.assertNotIn("Not yet released.", promoted)
+        preview_text = pages.generated_files(self.root)[self.root / "docs/index.html"].decode()
+        older_release = next(release for release in pages.load_releases(self.root)
+                             if release["status"] == "released")
+        self.assertIn('href="' + older_release["download"] + '" download>Download release · v'
+                      + older_release["version"], preview_text)
+        self.assertEqual(preview_text.count("Upcoming · Preview build"), 1)
+        self.assertIn("Not yet released.", preview_text)
 
     def test_build_and_check_detect_html_and_zip_drift_without_writing_in_check_mode(self):
         count, changed = pages.build(self.root)

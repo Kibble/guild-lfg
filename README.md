@@ -55,26 +55,15 @@ Use Battle.net's **Show in Explorer** to find your installation; the launch clie
 
 **Updating from an earlier version:** close WoW, copy this download's `GuildQueue` folder over the installed folder, then restart WoW. Your saved role/dungeon preferences are preserved; explicitly join the queue again after login.
 
-## Closed beta change history
+## Release history
 
-### v0.19.0 — changes since v0.16.5
-
-- **Whole-party queues:** leaders can list their 2–5 player party using WoW-assigned roles and their selected dungeons. The party stays together, and other members need neither guild membership nor the addon.
-- **Individual party-member queues:** nonleaders can queue separately with multiple class-allowed roles. A leader's party listing takes precedence without duplicates; still-active individual entries resume when it ends.
-- **Automatic listing updates:** queued parties update as members, roles or dungeon selections change, preserving queue age. Temporarily invalid or unavailable party data pauses the listing until it recovers.
-- **Per-dungeon match options:** see a separate option for every selected dungeon with compatible recruits, including partial matches. Options may share players and are not reservations.
-- **Safer recruitment:** each card invites only its missing recruits on click. Ten-second **Forming...** windows block conflicting options while unrelated matches remain usable.
-- **Simpler controls:** removed **Select all** and moved **Join queue** up. Party leaders see guidance for WoW's role controls; solo players and nonleaders retain multi-role selectors.
-
-### v0.16.5
-
-- Initial closed-beta release, with optional queue-view navigation controlled by `GuildQueue/Config.lua`.
+The per-version changelog lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Downloads website
 
-GitHub Pages publishes the generated **`docs/`** folder from **`main`**. The site lists only versions in **`site/releases.json`**, with changelog bullets taken from this README; intermediate ZIPs are not listed automatically.
+GitHub Pages publishes the generated **`docs/`** folder from **`main`**. The site lists only versions in **`site/releases.json`**, with changelog bullets taken from **`CHANGELOG.md`**; intermediate ZIPs are not listed automatically.
 
-- Add each version's ZIP at the project root and its bulleted notes under **Closed beta change history**.
+- Add each version's ZIP at the project root and its bulleted notes to **`CHANGELOG.md`** under **Closed beta change history**.
 - Add its version to `site/releases.json` as `preview`; change it to `released` only when ready. The main download button always selects the newest released version.
 - Run `python3 site/build.py`, `python3 site/build.py --check` and `python3 tests/pages.py`, then commit and push the generated site and ZIP copies with their sources.
 - Edit `site/template.html` for appearance changes; do not hand-edit `docs/index.html` or `docs/downloads/`. Building needs only Python 3's standard library; visitors need no JavaScript, and the site loads no third-party assets.

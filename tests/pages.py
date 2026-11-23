@@ -53,7 +53,7 @@ class DownloadsSiteTests(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
         (self.root / "site").mkdir()
-        for relative in ("README.md", "site/releases.json", "site/template.html"):
+        for relative in ("CHANGELOG.md", "site/releases.json", "site/template.html"):
             shutil.copyfile(ROOT / relative, self.root / relative)
         self.entries = json.loads((self.root / "site/releases.json").read_text())
         for entry in self.entries:
@@ -64,6 +64,7 @@ class DownloadsSiteTests(unittest.TestCase):
         (self.root / "site/releases.json").write_text(json.dumps(entries))
 
     def test_every_catalog_version_has_a_heading_download_and_exact_bulleted_notes(self):
+        self.assertFalse((self.root / "README.md").exists())
         outputs = pages.generated_files(self.root)
         text = outputs[self.root / "docs/index.html"].decode()
         page = Page(text)
@@ -109,9 +110,9 @@ class DownloadsSiteTests(unittest.TestCase):
         self.assertEqual(pages.build(self.root, check=True), (expected, 0))
         page = self.root / "docs/index.html"
         original = page.read_bytes()
-        readme = self.root / "README.md"
-        readme.write_text(re.sub(r"(^### v" + re.escape(self.entries[0]["version"]) + r"[^\n]*\n)",
-                                 r"\1\n- Extra test change.\n", readme.read_text(), count=1, flags=re.MULTILINE))
+        changelog = self.root / "CHANGELOG.md"
+        changelog.write_text(re.sub(r"(^### v" + re.escape(self.entries[0]["version"]) + r"[^\n]*\n)",
+                                    r"\1\n- Extra test change.\n", changelog.read_text(), count=1, flags=re.MULTILINE))
         with self.assertRaisesRegex(ValueError, "out of date"):
             pages.build(self.root, check=True)
         self.assertEqual(page.read_bytes(), original)

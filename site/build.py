@@ -1,6 +1,6 @@
-"""Build the dependency-free downloads site; README.md is the changelog source.
+"""Build the dependency-free downloads site; CHANGELOG.md is the changelog source.
 
-Add a versioned ZIP and README changelog, update site/releases.json, then run:
+Add a versioned ZIP and CHANGELOG.md entry, update site/releases.json, then run:
     python3 site/build.py
     python3 site/build.py --check
 GitHub Pages publishes the generated docs/ files from main. Never hand-edit them.
@@ -20,11 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 
 
-def read_changelog(readme):
+def read_changelog(changelog):
     marker = "## Closed beta change history\n"
-    if marker not in readme:
-        raise ValueError("README.md is missing its closed beta changelog.")
-    section = readme.split(marker, 1)[1].split("\n## ", 1)[0]
+    if marker not in changelog:
+        raise ValueError("CHANGELOG.md is missing its closed beta change history.")
+    section = changelog.split(marker, 1)[1].split("\n## ", 1)[0]
     releases, current = {}, None
     for line in section.splitlines():
         if line.startswith("### "):
@@ -53,7 +53,7 @@ def inline_markdown(text):
 
 def load_releases(root):
     entries = json.loads((root / "site/releases.json").read_text(encoding="utf-8"))
-    notes = read_changelog((root / "README.md").read_text(encoding="utf-8"))
+    notes = read_changelog((root / "CHANGELOG.md").read_text(encoding="utf-8"))
     if not isinstance(entries, list) or not entries:
         raise ValueError("site/releases.json must contain a nonempty release list.")
     releases, seen = [], set()
@@ -66,7 +66,7 @@ def load_releases(root):
         if status not in ("released", "preview"):
             raise ValueError("Release status must be released or preview.")
         if version not in notes:
-            raise ValueError("Missing README changelog for v" + version)
+            raise ValueError("Missing CHANGELOG.md entry for v" + version)
         seen.add(version)
         filename = "GuildQueue-" + version + ".zip"
         archive = root / filename

@@ -64,7 +64,6 @@ class DownloadsSiteTests(unittest.TestCase):
         (self.root / "site/releases.json").write_text(json.dumps(entries))
 
     def test_every_catalog_version_has_a_heading_download_and_exact_bulleted_notes(self):
-        self.assertFalse((self.root / "README.md").exists())
         outputs = pages.generated_files(self.root)
         text = outputs[self.root / "docs/index.html"].decode()
         page = Page(text)

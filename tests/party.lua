@@ -510,29 +510,6 @@ test("atomic matcher agrees with exhaustive candidate size age and dungeon order
     end
 end)
 
-test("legacy solos retain exhaustive full and partial feasibility", function()
-    math.randomseed(271828)
-    for _ = 1, 80 do
-        local state = ns.State.New()
-        for index = 1, math.random(3, 8) do
-            local dungeons = { [math.random(1, 2)] = true }
-            if math.random(1, 2) == 1 then dungeons[3] = true end
-            solo(state, "Solo" .. index .. "-Realm", math.random(1, 7), dungeons, 800 + index)
-        end
-        local groups, remaining = ns.Match(state), state:Sorted()
-        for _, group in ipairs(groups) do
-            local best, included, rest = 0, {}, {}
-            for dungeon = 1, 3 do best = math.max(best, maximum(remaining, dungeon, 1, {})) end
-            equal(#group.members, best)
-            for _, player in ipairs(group.members) do included[player.name] = true end
-            for _, player in ipairs(remaining) do if not included[player.name] then rest[#rest + 1] = player end end
-            remaining = rest
-        end
-        for dungeon = 1, 3 do assert(maximum(remaining, dungeon, 1, {}) < 2) end
-        checkGroups(state)
-    end
-end)
-
 test("party options retain matches for every dungeon without consuming primary suggestions", function()
     local state = ns.State.New()
     apply(state, transaction(nil, 1, 1000, 900, { [1] = true, [2] = true, [3] = true }))

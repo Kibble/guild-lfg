@@ -4,17 +4,7 @@
 
 ## Screenshot
 
-![Guild Queue in game, showing role icons, dungeon selections, and a queued guild member](docs/images/guild-queue.png)
-
-The screenshot shows an earlier native-UI build. The current window has **Dungeons** and **Quests** bottom tabs. Dungeons also has a **Default / Role List** view selector.
-
-### Earlier bottom-tab previews (0.7.1)
-
-These are older design mockups, not in-game captures. They do not show the 0.7.2 spacing fix or the uniform tab geometry introduced in 0.7.3. The tabs use blank art strips from your Auction House reference: a gold-bordered selected tab and darker inactive tabs, hanging beneath the frame. Fonts and layout are approximate; the addon itself uses WoW's built-in tab artwork, not these preview images.
-
-![Dungeons page with queue controls and Dungeons selected along the bottom](mockups/GuildQueue-bottom-dungeons-mockup.png)
-
-![Full-width Quests page with Quests selected along the bottom](mockups/GuildQueue-bottom-quests-mockup.png)
+<img width="808" height="593" alt="image" src="https://github.com/user-attachments/assets/26b1dc5f-8564-4e83-bf9f-cffeae9eca86" />
 
 ## What it does
 

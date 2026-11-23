@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Download Guild Queue for WoW:Forever. Versioned addon ZIPs, release notes and simple installation instructions.">
+  <title>Guild Queue — Downloads &amp; release notes</title>
+  <style>
+    :root { color-scheme: dark; --bg: #101316; --panel: #1a1f24; --text: #f3f0e8; --muted: #b8b9b7; --gold: #f1cc75; --line: #394047; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 1rem/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    a { color: var(--gold); text-underline-offset: .2em; }
+    a:focus-visible { outline: 3px solid var(--gold); outline-offset: 5px; }
+    .skip { position: absolute; top: -5rem; left: 1rem; padding: .5rem 1rem; background: var(--panel); }
+    .skip:focus { top: 1rem; }
+    .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem; }
+    header { border-bottom: 1px solid var(--line); padding: 4.5rem 0 3rem; background: linear-gradient(135deg, #232721, var(--bg) 70%); }
+    .eyebrow { margin: 0 0 .7rem; color: var(--gold); font-size: .8rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(2.6rem, 8vw, 4.5rem); line-height: 1.1; letter-spacing: -.045em; }
+    .intro { max-width: 40rem; margin: 1.25rem 0 1.75rem; color: var(--muted); font-size: 1.15rem; }
+    .button { display: inline-block; border: 1px solid var(--gold); border-radius: .5rem; padding: .7rem 1.1rem; color: #171711; background: var(--gold); text-decoration: none; font-weight: 750; }
+    .button:hover { background: #ffe3a2; border-color: #ffe3a2; }
+    .secondary { background: transparent; color: var(--gold); }
+    .secondary:hover { background: #353023; color: #ffe3a2; }
+    .quiet { color: var(--muted); font-size: .9rem; }
+    main { padding-top: 2.5rem !important; padding-bottom: 2rem !important; }
+    h2 { font-size: 1.55rem; line-height: 1.3; margin: 0 0 .75rem; }
+    .section-intro { color: var(--muted); margin: 0 0 1.5rem; }
+    .release { padding: 1.75rem; margin: 0 0 1.4rem; background: var(--panel); border: 1px solid var(--line); border-radius: .85rem; }
+    .release-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1.25rem; }
+    h3 { margin: .45rem 0 .2rem; font-size: 1.65rem; line-height: 1.25; }
+    .badge { display: inline-block; padding: .15rem .6rem; border-radius: 2rem; background: #203a2b; color: #b3e5bd; font-size: .75rem; font-weight: 700; letter-spacing: .025em; }
+    .badge.preview { background: #3c321c; color: #f5d58f; }
+    .release-meta { margin: .35rem 0 0; }
+    .preview-note { border-left: 3px solid var(--gold); padding-left: .8rem; color: #e7d4aa; }
+    .changes { padding-left: 1.3rem; margin: 1.4rem 0 0; }
+    .changes li + li { margin-top: .65rem; }
+    code { padding: .1rem .35rem; border-radius: .25rem; background: #101519; color: #f5dda0; font-size: .9em; overflow-wrap: anywhere; }
+    .install { margin-top: 3rem; }
+    .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.3rem; list-style: none; padding: 0; counter-reset: step; }
+    .steps li { border-top: 2px solid var(--line); padding-top: .9rem; counter-increment: step; }
+    .steps strong { display: block; margin-bottom: .4rem; }
+    .steps strong::before { content: counter(step) ". "; color: var(--gold); }
+    footer { padding: 1.5rem 0 2.5rem; border-top: 1px solid var(--line); }
+    @media (max-width: 40rem) {
+      header { padding-top: 3rem; }
+      .wrap { padding-left: 1rem; padding-right: 1rem; }
+      .release { padding: 1.25rem; }
+      .release-head { display: block; }
+      .release-head .button { margin-top: 1rem; }
+      .steps { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#releases">Skip to downloads</a>
+  <header>
+    <div class="wrap">
+      <p class="eyebrow">WoW:Forever · Closed beta</p>
+      <h1>Guild Queue</h1>
+      <p class="intro">Find dungeon groups with your guild. Pick your roles and dungeons, browse compatible players, and invite when you're ready.</p>
+      <a class="button" href="$primary_download" download>Download release · v$primary_version</a>
+      <p class="quiet">Want to try what's next? Preview builds are clearly marked below.</p>
+    </div>
+  </header>
+  <main class="wrap">
+    <section id="releases" aria-labelledby="releases-title">
+      <h2 id="releases-title">Downloads &amp; release notes</h2>
+      <p class="section-intro">Every version includes an installable ZIP and a short list of changes since the previous release.</p>
+$release_cards
+    </section>
+    <section class="install" aria-labelledby="install-title">
+      <h2 id="install-title">Install in three steps</h2>
+      <ol class="steps">
+        <li><strong>Download &amp; extract</strong>Close the game and extract your chosen ZIP. Inside is the <code>GuildQueue</code> folder.</li>
+        <li><strong>Copy the addon</strong>Put that folder in your Forever installation's <code>Interface/AddOns</code> directory.</li>
+        <li><strong>Enable &amp; play</strong>Enable Guild Queue in the AddOns list, then type <code>/gq</code> in game.</li>
+      </ol>
+      <p class="quiet">Use the same addon version as your guildmates. Updating preserves saved preferences; join the queue again after login.</p>
+    </section>
+  </main>
+  <footer>
+    <div class="wrap quiet">Guild-only coordination. Invitations are always manual. No automatic accepting or teleporting.</div>
+  </footer>
+</body>
+</html>

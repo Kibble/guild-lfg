@@ -185,6 +185,10 @@ local function showQueueTooltip(control)
             and "Queue your whole party using its assigned roles and your selected dungeons. Members need not be in your guild or have this addon."
             or "Join the guild queue with your selected roles and dungeons."),
         1, 1, 1, true)
+    if ns.queued and ns.QueueUpdatePending() then
+        GameTooltip:AddLine(ns.JoinQueueDisabledReason()
+            or "Updating your party listing with its current roster and roles.", 1, 1, 1, true)
+    end
     GameTooltip:Show()
 end
 

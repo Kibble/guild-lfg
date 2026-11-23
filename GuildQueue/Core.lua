@@ -14,6 +14,7 @@ local send, updateGuild, nextRevision, refreshFormationIndexes
 local actualPartyMembers, nativeQueueSnapshot, reconcileQueued
 local queueMode, queueRosterIdentity, queueSelectionSignature
 local stateBatch, partyNeedsClear = nil, false
+local partyUpdatePaused, partyWithdrawalPending = false, false
 local soloInvitationBatch
 local queueRecordNames, matchupByGroup, matchupByKey, matchupByPlayer = {}, {}, {}, {}
 local formationClaims, formationByOwner, formationWatermarks, pendingFormationReleases = {}, {}, {}, {}
@@ -962,6 +963,7 @@ function ns.SetQueued(wanted)
             queueMode, queueRosterIdentity = snapshot.mode, snapshot.identity
             queueSelectionSignature = snapshot.selection
             stateBatch, partyNeedsClear = nil, snapshot.mode == "party"
+            partyUpdatePaused, partyWithdrawalPending = false, false
         end
         ns.queued = true
         printMessage("Queue requested. Use Create party or Invite Others on your suggested group to invite its missing members.")
@@ -971,6 +973,7 @@ function ns.SetQueued(wanted)
         ns.queued, ns.joinedAt = false, nil
         queueMode, queueRosterIdentity, queueSelectionSignature = nil, nil, nil
         stateBatch, partyNeedsClear, pendingRoleNotices = nil, false, {}
+        partyUpdatePaused, partyWithdrawalPending = false, false
         soloInvitationBatch = nil
         -- Remove both the owner and unfinished fragments without losing replay protection.
         if ns.playerName then ns.state:Remove(ns.playerName) end
@@ -979,6 +982,15 @@ function ns.SetQueued(wanted)
     end
     requestState(0)
     ns.RefreshUI()
+end
+
+local function pausePartyListing()
+    if not partyUpdatePaused then
+        partyUpdatePaused, partyWithdrawalPending, stateBatch = true, true, nil
+        ns.state:Remove(ns.playerName)
+        rebuild()
+        requestState(0)
+    end
 end
 
 reconcileQueued = function()
@@ -998,26 +1010,42 @@ reconcileQueued = function()
             if valid then return current end
         end
     end
+    if queueMode == "party" then
+        local home = safeCall(IsInGroup, LE_PARTY_CATEGORY_HOME)
+        local instance = safeCall(IsInGroup, LE_PARTY_CATEGORY_INSTANCE)
+        local raid = safeCall(IsInRaid, LE_PARTY_CATEGORY_HOME)
+        local leader = safeCall(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME)
+        if home == false or instance == true or raid == true or leader == false
+            or not ns.Protocol.ValidSelections(1, ns.prefs.dungeons) then
+            ns.SetQueued(false)
+            return nil
+        end
+        if home ~= true or instance ~= false or raid ~= false or leader ~= true then
+            pausePartyListing()
+            return nil
+        end
+    end
     local roster = actualPartyMembers()
     local mode = roster and (roster.homeGroup and "party" or "solo")
     if not roster or mode ~= queueMode then
-        ns.SetQueued(false)
+        if queueMode == "party" then pausePartyListing() else ns.SetQueued(false) end
         return nil
     end
     local snapshot = nativeQueueSnapshot(roster)
     if not snapshot then
-        -- Unknown class capabilities suspend solo updates, as before. Native
-        -- party identities, leadership and assigned roles must always be known.
-        if mode == "solo" and not ns.AllowedRoles() then return nil end
+        -- Roster/role information can lag behind a join or role change. Keep
+        -- the leader's intent, but withdraw the unusable listing until valid.
+        if mode == "party" then pausePartyListing()
+        elseif ns.AllowedRoles() then ns.SetQueued(false) end
+        return nil
+    end
+    if mode ~= "party" and snapshot.identity ~= queueRosterIdentity then
         ns.SetQueued(false)
         return nil
     end
-    if snapshot.identity ~= queueRosterIdentity then
-        ns.SetQueued(false)
-        return nil
-    end
-    if snapshot.selection ~= queueSelectionSignature then
-        queueSelectionSignature, stateBatch = snapshot.selection, nil
+    if partyUpdatePaused or snapshot.selection ~= queueSelectionSignature then
+        partyUpdatePaused = false
+        queueRosterIdentity, queueSelectionSignature, stateBatch = snapshot.identity, snapshot.selection, nil
         ns.state:Remove(ns.playerName)
         rebuild()
         requestState(0)
@@ -1058,6 +1086,7 @@ local function applyGuildIdentity(guildName, guildRealm)
         ns.queued, ns.joinedAt = false, nil
         queueMode, queueRosterIdentity, queueSelectionSignature = nil, nil, nil
         stateBatch, partyNeedsClear = nil, false
+        partyUpdatePaused, partyWithdrawalPending = false, false
         ns.state = ns.State.New()
         pendingStateAt, pendingHello, pendingPresence = nil, key ~= nil, key ~= nil
         lastHello, lastPresence, lastHelloReply = -100, -100, -100
@@ -1287,7 +1316,11 @@ end
 send = function(message)
     if ns.queued then
         local signature = queueSelectionSignature
-        if not reconcileQueued() or signature ~= queueSelectionSignature then return false end
+        if (not reconcileQueued() and not partyUpdatePaused) or signature ~= queueSelectionSignature then return false end
+        if partyUpdatePaused and type(message) == "string" then
+            local kind = message:match("^1|([^|]+)")
+            if kind == "S" or kind == "B" or kind == "C" or kind == "F" then return false end
+        end
     end
     if not ns.IsReady() or type(message) ~= "string" then return false end
     if safeCall(C_ChatInfo and C_ChatInfo.InChatMessagingLockdown) == true then
@@ -1311,7 +1344,10 @@ local function sendState()
     if soloInvitationBatch then return false end
     if restrictRoles() then ns.PreferencesChanged() end
     local snapshot = ns.queued and reconcileQueued()
-    if ns.queued and not snapshot then return false end
+    if ns.queued and not snapshot and not partyWithdrawalPending then
+        pendingStateAt = nil
+        return false
+    end
     if not ns.IsReady() then return false end
     local now = GetServerTime()
     if stateBatch and (now - stateBatch.sentAt >= ns.TIMEOUT or stateBatch.sentAt > now + 5
@@ -1322,7 +1358,9 @@ local function sendState()
     end
     if not stateBatch then
         local messages = {}
-        if ns.queued and snapshot.mode == "party" then
+        if partyWithdrawalPending then
+            messages[1] = ns.Protocol.Encode({ kind = "X", revision = nextRevision(), sentAt = now })
+        elseif ns.queued and snapshot.mode == "party" then
             -- Old clients only understand X/S. Clear a legacy solo once, never
             -- during heartbeats: receivers retain their last complete party.
             if partyNeedsClear then
@@ -1343,7 +1381,7 @@ local function sendState()
             messages[1] = ns.Protocol.Encode(packet)
         end
         stateBatch = { messages = messages, index = 1, sentAt = now,
-            signature = queueSelectionSignature, guildKey = ns.guildKey }
+            signature = queueSelectionSignature, guildKey = ns.guildKey, withdrawal = partyWithdrawalPending }
     end
     local batch = stateBatch
     local message = batch.messages[batch.index]
@@ -1358,6 +1396,10 @@ local function sendState()
     batch.index = batch.index + 1
     if batch.index > #batch.messages then
         stateBatch, pendingStateAt, lastSent = nil, nil, GetTime()
+        if batch.withdrawal then
+            partyWithdrawalPending = false
+            if ns.queued and not partyUpdatePaused then requestState(0) end
+        end
         if changed then rebuild() else ns.RefreshUI() end
     elseif changed then
         -- Only an initial withdrawal can change visible state before commit.
@@ -1437,9 +1479,9 @@ local function tick()
         safeCall(C_GuildInfo and C_GuildInfo.GuildRoster)
     end
     prepareQuestBatch(clock)
-    if ns.queued and clock - lastSent >= ns.HEARTBEAT then
+    if ns.queued and not partyUpdatePaused and clock - lastSent >= ns.HEARTBEAT then
         requestState(0)
-    elseif not ns.queued and clock - lastPresence >= ns.HEARTBEAT then
+    elseif (not ns.queued or partyUpdatePaused) and clock - lastPresence >= ns.HEARTBEAT then
         pendingPresence = true
     end
     while pendingRoleNotices[1] and serverNow - pendingRoleNotices[1].sentAt >= 30 do
@@ -1559,7 +1601,7 @@ local function receive(prefix, message, channel, sender)
         presence[name] = now
         if packet.kind == "H" and GetTime() - lastHelloReply >= 5 then
             lastHelloReply = GetTime()
-            if ns.queued then requestState(math.random(1, 5)) end
+            if ns.queued and not partyUpdatePaused then requestState(math.random(1, 5)) end
             if ns.prefs.shareQuests then lastQuestSent = -100 end
         end
         ns.RefreshUI()
@@ -1657,6 +1699,7 @@ events:SetScript("OnEvent", function(_, event, ...)
             ns.queued, ns.joinedAt = false, nil
             queueMode, queueRosterIdentity, queueSelectionSignature = nil, nil, nil
             stateBatch, partyNeedsClear = nil, false
+            partyUpdatePaused, partyWithdrawalPending = false, false
             ns.state:Remove(ns.playerName)
             -- Best effort only: peers also expire entries if logout delivery is lost.
             sendState()

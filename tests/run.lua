@@ -1031,13 +1031,12 @@ local function suggestedPartial(c, count)
     return c.ns.groups[1]
 end
 
--- Native grouping withdraws a solo queue; only an explicit leader action starts
--- the replacement party queue. Wait for X + B + every member before using it.
+-- Native grouping needs an explicit initial leader action. Once queued, a
+-- leader's roster edits update the same listing; wait for its complete batch.
 local function requeueNativeParty(c, members)
     c.homeGroup, c.partyMembers = true, members or c.partyMembers
     c:fire("GROUP_ROSTER_UPDATE")
-    assert(not c.ns.queued)
-    c.ns.SetQueued(true)
+    if not c.ns.queued then c.ns.SetQueued(true) end
     assert(c.ns.queued)
     c:advance(#c.partyMembers + 6)
     assert(not c.ns.QueueUpdatePending())
@@ -1968,7 +1967,7 @@ test("Invite Others normalizes party identities without merging characters on di
     assert(c.ns.QueueUpdatePending()) -- Same character name on another realm changes the native roster.
     assert(c.ns.CreatePartyDisabledReason(group))
     assert(not c.ns.CreateParty(group))
-    assert(not c.ns.queued)
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
     equal(#c.invites, 0)
 end)
 test("Invite Others rechecks the party roster and current suggestion at the actual click", function()
@@ -1978,7 +1977,7 @@ test("Invite Others rechecks the party roster and current suggestion at the actu
     assert(c.ns.CreatePartyDisabledReason(group) == nil)
     c.partyMembers[2] = "Outsider-TestRealm"
     assert(not c.ns.CreateParty(group))
-    assert(not c.ns.queued)
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
     group = requeueNativeParty(c, { "Friend-TestRealm" })
     c:receive("D1-TestRealm", { kind = "X", revision = 2, sentAt = c.now })
     assert(not c.ns.CreateParty(group)) -- A missing solo recruit replaces the suggestion.
@@ -4081,7 +4080,7 @@ test("Invite Others button tracks permission combat completed party and unrelate
     assert(c.tooltip.text:find("already in your party", 1, true))
     c.partyMembers = { "Friend-TestRealm", "Outsider-TestRealm" }
     c:fire("GROUP_ROSTER_UPDATE")
-    assert(not c.ns.queued and not control.shown and control.group == nil)
+    assert(c.ns.queued and c.ns.QueueUpdatePending() and not control.shown and control.group == nil)
     assert(not c.tooltip.shown)
     control.scripts.OnClick(control)
     equal(#c.invites, 0)
@@ -4097,7 +4096,7 @@ test("Invite Others does not trust eligibility rendered before a party change", 
     c.partyMembers[2] = "Outsider-TestRealm" -- No UI refresh before clicking.
     control.scripts.OnClick(control)
     equal(#c.invites, 0)
-    assert(not c.ns.queued and not control.shown and control.group == nil)
+    assert(c.ns.queued and c.ns.QueueUpdatePending() and not control.shown and control.group == nil)
     assert(not c.tooltip.shown)
 end)
 

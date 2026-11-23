@@ -228,12 +228,15 @@ test("assigned party role changes invalidate old local slots and preserve queue 
     equal(c.ns.state:Get("Guest-OtherRealm").roles, 4) equal(c.ns.joinedAt, age)
 end)
 
-test("invalid assigned roles immediately withdraw the whole party even in messaging lockdown", function()
+test("invalid assigned roles withdraw the listing but retain leader intent through messaging lockdown", function()
     local c = party() queued(c)
     c.locked = true c.partyRoles.party1 = "NONE"
     c:fire("ROLE_CHANGED_INFORM", "party1", "HEALER", "NONE")
-    assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
+    assert(c.ns.queued and c.ns.QueueUpdatePending()) equal(#c.ns.state:Sorted(), 0)
     local count = #c.sent c.locked = false c:advance(10) noPartyPacketsAfter(c, count)
+    c.partyRoles.party1 = "HEALER" c:fire("PLAYER_ROLES_ASSIGNED")
+    c:advance(8) assert(c.ns.queued and not c.ns.QueueUpdatePending())
+    equal(#c.ns.state:Sorted(), 2) equal(#c.invites, 0)
 end)
 
 test("party leadership handoff removes the old queue and requires the new leader to explicitly queue", function()
@@ -247,16 +250,24 @@ test("party leadership handoff removes the old queue and requires the new leader
     queued(c) equal(#c.ns.state:Sorted(), 2)
 end)
 
-test("party roster changes disbanding and solo-to-party transitions never autoenroll anyone", function()
-    for _, change in ipairs({ "join", "leave", "disband" }) do
+test("queued leader roster changes update in place while disbanding and initial grouping still withdraw", function()
+    for _, change in ipairs({ "join", "replace" }) do
         local c = party() queued(c)
+        local age = c.ns.joinedAt
         if change == "join" then c.partyMembers[2] = "New-OtherRealm"
-        elseif change == "leave" then c.partyMembers = { "Different-OtherRealm" }
-        else c.homeGroup, c.partyMembers = false, {} end
+        else c.partyMembers = { "Different-OtherRealm" } end
         c:fire("GROUP_ROSTER_UPDATE")
-        assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
-        local count = #c.sent c:advance(8) noPartyPacketsAfter(c, count)
+        assert(c.ns.queued and c.ns.QueueUpdatePending()) equal(#c.ns.state:Sorted(), 0)
+        c:advance(8) assert(not c.ns.QueueUpdatePending())
+        equal(c.ns.joinedAt, age)
+        equal(#c.ns.state:Sorted(), #c.partyMembers + 1)
+        equal(#c.invites, 0)
     end
+    local disbanded = party() queued(disbanded)
+    disbanded.homeGroup, disbanded.partyMembers = false, {}
+    disbanded:fire("GROUP_ROSTER_UPDATE")
+    assert(not disbanded.ns.queued) equal(#disbanded.ns.state:Sorted(), 0)
+    local count = #disbanded.sent disbanded:advance(8) noPartyPacketsAfter(disbanded, count)
     local c = client() queued(c)
     c.homeGroup, c.partyMembers, c.partyLeader = true, { "Guest-OtherRealm" }, false
     c:fire("GROUP_ROSTER_UPDATE")
@@ -270,7 +281,139 @@ test("lost roster and role events are still checked before every queued transmis
     assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
     local d = party() d.ns.SetQueued(true) d:advance(2)
     d.partyRoles.party1 = "NONE" d:advance(1)
-    assert(not d.ns.queued) equal(#d.ns.state:Sorted(), 0)
+    assert(d.ns.queued and d.ns.QueueUpdatePending()) equal(#d.ns.state:Sorted(), 0)
+    d.partyRoles.party1 = "HEALER" d:advance(8)
+    assert(not d.ns.QueueUpdatePending())
+end)
+
+test("joining and leaving members update the remote listing atomically without resetting queue age", function()
+    local c, observer = party(), client({ characterName = "Observer" })
+    link(c, observer) queued(c)
+    local age = c.ns.joinedAt
+    c.partyMembers[2], c.partyRoles.party2 = "New-OtherRealm", "DAMAGER"
+    c:fire("GROUP_ROSTER_UPDATE")
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
+    c:advance(2) equal(#observer.ns.state:Sorted(), 2)
+    c:advance(6) equal(#observer.ns.state:Sorted(), 3)
+    equal(observer.ns.state:Get("New-OtherRealm").roles, 4)
+    c.partyMembers, c.partyRoles = { "New-OtherRealm" }, { player = "TANK", party1 = "DAMAGER" }
+    c:fire("GROUP_ROSTER_UPDATE") c:advance(8)
+    equal(#observer.ns.state:Sorted(), 2)
+    equal(observer.ns.state:Get("Guest-OtherRealm"), nil)
+    assert(observer.ns.state:Get("New-OtherRealm"))
+    equal(c.ns.joinedAt, age) equal(#c.invites, 0)
+end)
+
+test("a new member without an assigned role pauses publication and resumes when the role is assigned", function()
+    local c, observer = party(), client({ characterName = "Observer" })
+    link(c, observer) queued(c)
+    local age = c.ns.joinedAt
+    c.partyMembers[2], c.partyRoles.party2 = "New-OtherRealm", "NONE"
+    c:fire("GROUP_ROSTER_UPDATE")
+    assert(c.ns.queued and c.ns.QueueUpdatePending()) equal(#c.ns.state:Sorted(), 0)
+    c:advance(2) equal(#observer.ns.state:Sorted(), 0)
+    local join = controls(c)
+    equal(join.text, "Leave party queue") assert(join.enabled)
+    join.scripts.OnEnter(join)
+    assert(table.concat(c.tooltip.lines, "\n"):find("role", 1, true))
+    c.partyRoles.party2 = "DAMAGER" c:fire("PLAYER_ROLES_ASSIGNED")
+    c:advance(8)
+    assert(not c.ns.QueueUpdatePending()) equal(#observer.ns.state:Sorted(), 3)
+    equal(c.ns.joinedAt, age) equal(#c.invites, 0)
+end)
+
+test("temporary roster lookup failure retains intent and recovers without a queue click", function()
+    local c, observer = party(), client({ characterName = "Observer" })
+    link(c, observer) queued(c)
+    c.partyCount = 2 c:fire("GROUP_ROSTER_UPDATE") -- party2 is not available yet.
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
+    c:advance(2) equal(#observer.ns.state:Sorted(), 0)
+    c.partyMembers[2], c.partyRoles.party2 = "New-OtherRealm", "DAMAGER"
+    c.partyCount = nil c:fire("GROUP_ROSTER_UPDATE") c:advance(8)
+    assert(not c.ns.QueueUpdatePending()) equal(#observer.ns.state:Sorted(), 3)
+end)
+
+test("invalid native role capacity pauses a listing and a valid role change republishes it", function()
+    local c = party() queued(c)
+    c.partyRoles.party1 = "TANK" c:fire("PLAYER_ROLES_ASSIGNED")
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
+    c:advance(2) equal(#c.ns.state:Sorted(), 0)
+    c.partyRoles.player = "HEALER" c:fire("ROLE_CHANGED_INFORM") c:advance(8)
+    assert(not c.ns.QueueUpdatePending())
+    equal(c.ns.state:Get(c.ns.playerName).roles, 2)
+    equal(c.ns.state:Get("Guest-OtherRealm").roles, 1)
+end)
+
+test("roster and role updates during a failed transaction publish only the latest whole party", function()
+    local c, observer = party(), client({ characterName = "Observer" })
+    link(c, observer) queued(c)
+    local age = c.ns.joinedAt
+    c.result = 9
+    c.partyMembers[2], c.partyRoles.party2 = "Intermediate-OtherRealm", "DAMAGER"
+    c:fire("GROUP_ROSTER_UPDATE") c:advance(1)
+    c.partyMembers[2], c.partyRoles.party2 = "Latest-OtherRealm", "DAMAGER"
+    c.partyRoles.party1 = "DAMAGER"
+    c:fire("PLAYER_ROLES_ASSIGNED") c:fire("GROUP_ROSTER_UPDATE")
+    c.result = 0 c:advance(12)
+    assert(not c.ns.QueueUpdatePending()) equal(#observer.ns.state:Sorted(), 3)
+    equal(observer.ns.state:Get("Intermediate-OtherRealm"), nil)
+    equal(observer.ns.state:Get("Guest-OtherRealm").roles, 4)
+    equal(observer.ns.state:Get("Latest-OtherRealm").roles, 4)
+    equal(c.ns.joinedAt, age) equal(#c.invites, 0)
+end)
+
+test("a roster edit during initial multipart delivery replaces rather than mixes staged members", function()
+    local c, observer = party(), client({ characterName = "Observer" })
+    link(c, observer) c.ns.SetQueued(true) c:advance(3)
+    c.partyMembers[2], c.partyRoles.party2 = "New-OtherRealm", "DAMAGER"
+    c:fire("GROUP_ROSTER_UPDATE") c:advance(8)
+    assert(not c.ns.QueueUpdatePending()) equal(#observer.ns.state:Sorted(), 3)
+    equal(observer.ns.state.records[c.ns.playerName].partySize, 3)
+end)
+
+test("paused listings withdraw once without starving presence quest or version traffic", function()
+    local c, observer = party(), client({ characterName = "Observer" })
+    link(c, observer) queued(c)
+    c.ns.SetQuestSharing(true)
+    c.partyRoles.party1 = "NONE" c:fire("PLAYER_ROLES_ASSIGNED")
+    local start = #c.sent
+    c:receive("Older-TestRealm", { kind = "V", sentAt = c.now, version = "0.1.0" })
+    c:advance(45)
+    local withdrawals, presence, quests, versions = 0, 0, 0, 0
+    for i = start + 1, #c.sent do
+        local p = c.ns.Protocol.Decode(c.sent[i].text)
+        local q = c.ns.Questing.Decode(c.sent[i].text)
+        if p then
+            assert(p.kind ~= "S" and p.kind ~= "B" and p.kind ~= "C")
+            if p.kind == "X" then withdrawals = withdrawals + 1 end
+            if p.kind == "P" then presence = presence + 1 end
+            if p.kind == "V" then versions = versions + 1 end
+        end
+        if q and q.kind == "Q" then quests = quests + 1 end
+    end
+    equal(withdrawals, 1) assert(presence >= 1 and quests >= 1 and versions >= 1)
+    assert(c.ns.queued and c.ns.QueueUpdatePending())
+    equal(#observer.ns.state:Sorted(), 0) equal(#c.invites, 0)
+end)
+
+test("explicit leave while a party update is paused prevents recovery from requeuing it", function()
+    local c = party() queued(c)
+    c.partyRoles.party1 = "NONE" c:fire("PLAYER_ROLES_ASSIGNED") c:advance(2)
+    c.ns.SetQueued(false)
+    c.partyRoles.party1 = "HEALER" c:fire("PLAYER_ROLES_ASSIGNED")
+    local count = #c.sent c:advance(12) noPartyPacketsAfter(c, count)
+    assert(not c.ns.queued) equal(#c.ns.state:Sorted(), 0)
+end)
+
+test("lost leadership during a pending party update still cancels all automatic recovery", function()
+    local c = party() queued(c)
+    c.partyRoles.party1 = "NONE" c:fire("PLAYER_ROLES_ASSIGNED") c:advance(1)
+    c.partyLeader = false c:fire("PARTY_LEADER_CHANGED")
+    assert(not c.ns.queued)
+    c.partyRoles.party1, c.partyLeader = "HEALER", true
+    c:fire("PLAYER_ROLES_ASSIGNED")
+    local count = #c.sent c:advance(10) noPartyPacketsAfter(c, count)
+    assert(not c.ns.queued)
 end)
 
 test("dungeon changes in the middle of a fragment batch cannot mix transactions", function()
